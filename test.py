@@ -1,7 +1,7 @@
 import cv2
 import os
 
-video_file = os.path.expanduser('/root/yolo26_data/data/orange_video/orange.mkv')
+video_file = os.path.expanduser('output/orange.mkv')
 output_folder = os.path.expanduser('/root/yolo26_data/data/orange_pic')
 
 os.makedirs(output_folder, exist_ok=True)
