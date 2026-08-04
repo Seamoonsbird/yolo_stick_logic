@@ -56,7 +56,7 @@ docker run -it \
   -e XAUTHORITY=/root/.Xauthority \
   -v ~/yolo26_data:/root/yolo26_data \
   -v ~/yahboom_demo:/ultralytics/yahboom_demo \
-  -v ~/yolo_stick_logic:/root/yolo_stick_logic \
+  -v ~/yolo_stick_logic:/ultralytics/yolo_stick_logic \
   -v /tmp:/tmp \
   -v $HOME/.Xauthority:/root/.Xauthority:ro \
   -v /etc/nv_tegra_release:/etc/nv_tegra_release:ro \
