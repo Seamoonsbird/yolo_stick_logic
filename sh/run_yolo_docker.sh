@@ -27,21 +27,38 @@ for dev in /dev/video*; do
 done
 
 # --- 启动 Docker 容器 ---
+# 各参数说明：
+#   --net=host            使用宿主机网络栈（性能更好，但端口直接暴露）
+#   --ipc=host            共享宿主机 IPC 命名空间（多进程通信需要）
+#   --privileged          特权模式，给予容器几乎所有宿主机能力（硬件访问需要）
+#   --runtime=nvidia      使用 NVIDIA 容器运行时，支持 GPU 透传
+#   --name yolo26_csi     将容器命名，方便下次通过 docker exec 重新进入
+#   --gpus all            将所有可用 GPU 分配给容器
+#   -e DISPLAY=:0         容器内 DISPLAY 环境变量
+#   -e QT_X11_NO_MITSHM=1 禁用 MIT-SHM 共享内存扩展（避免 Qt/X11 显示异常）
+#   -e XAUTHORITY         X11 认证文件路径
+#   -v ~/yolo26_data      挂载 YOLO 数据集目录
+#   -v ~/yahboom_demo     挂载 yahboom 演示程序目录
+#   -v ~/yolo_stick_logic 挂载决策程序目录
+#   -v /tmp               共享临时文件目录（X11 socket 通信需要）
+#   -v .Xauthority        挂载 X11 认证文件（只读）
+#   -v nv_tegra_release   挂载 NVIDIA Tegra 版本信息（只读）
+#   $VIDEO_DEVICES        动态注入摄像头设备
 docker run -it \
-  --net=host \                          # 使用宿主机网络栈（性能更好，但端口直接暴露）
-  --ipc=host \                          # 共享宿主机 IPC 命名空间（多进程通信需要）
-  --privileged \                        # 特权模式，给予容器几乎所有宿主机能力（硬件访问需要）
-  --runtime=nvidia \                    # 使用 NVIDIA 容器运行时，支持 GPU 透传
-  --name yolo26_csi \                   # 将容器命名，方便下次重新打开
-  --gpus all \                          # 将所有可用 GPU 分配给容器
-  -e DISPLAY=:0 \                       # 容器内 DISPLAY 环境变量
-  -e QT_X11_NO_MITSHM=1 \               # 禁用 MIT-SHM 共享内存扩展（避免 Qt/X11 显示异常）
-  -e XAUTHORITY=/root/.Xauthority \     # X11 认证文件路径
-  -v ~/yolo26_data:/root/yolo26_data \  # 挂载 YOLO 数据集目录
-  -v ~/yahboom_demo:/ultralytics/yahboom_demo \  # 挂载 yahboom 演示程序目录
-  -v ~/yolo_stick_logic:/root/yolo_stick_logic \  #挂载决策程序目录
-  -v /tmp:/tmp \                        # 共享临时文件目录（X11 socket 通信需要）
-  -v $HOME/.Xauthority:/root/.Xauthority:ro \     # 挂载 X11 认证文件（只读）
-  -v /etc/nv_tegra_release:/etc/nv_tegra_release:ro \  # 挂载 NVIDIA Tegra 版本信息（只读）
-  $VIDEO_DEVICES \                      # 动态注入摄像头设备
-  yahboomtechnology/ultralytics:1.0.4 /bin/bash    # 镜像名:标签 + 启动 shell
+  --net=host \
+  --ipc=host \
+  --privileged \
+  --runtime=nvidia \
+  --name yolo26_csi \
+  --gpus all \
+  -e DISPLAY=:0 \
+  -e QT_X11_NO_MITSHM=1 \
+  -e XAUTHORITY=/root/.Xauthority \
+  -v ~/yolo26_data:/root/yolo26_data \
+  -v ~/yahboom_demo:/ultralytics/yahboom_demo \
+  -v ~/yolo_stick_logic:/root/yolo_stick_logic \
+  -v /tmp:/tmp \
+  -v $HOME/.Xauthority:/root/.Xauthority:ro \
+  -v /etc/nv_tegra_release:/etc/nv_tegra_release:ro \
+  $VIDEO_DEVICES \
+  yahboomtechnology/ultralytics:1.0.4 /bin/bash

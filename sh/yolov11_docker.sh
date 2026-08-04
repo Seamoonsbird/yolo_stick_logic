@@ -10,14 +10,24 @@
 xhost +
 
 # --- 启动 Docker 容器 ---
+# 各参数说明：
+#   --net=host                    使用宿主机网络栈
+#   --env="DISPLAY"               将宿主机的 DISPLAY 环境变量传入容器
+#   --env="QT_X11..."             禁用 MIT-SHM，避免 Qt 应用显示异常
+#   -v X11-unix                   挂载 X11 Unix socket，实现图形界面透传
+#   -v temp                       挂载临时文件目录到 ultralytics 工作目录
+#   -v YoloSmartStick             挂载 YoloSmartStick 项目源码目录
+#   --device=/dev/video0          直通 USB 摄像头设备
+#   -p 9090:9090                  映射 9090 端口
+#   -p 8888:8888                  映射 8888 端口
 docker run -it \
-  --net=host \                                          # 使用宿主机网络栈
-  --env="DISPLAY" \                                     # 将宿主机的 DISPLAY 环境变量传入容器
-  --env="QT_X11_NO_MITSHM=1" \                          # 禁用 MIT-SHM，避免 Qt 应用显示异常
-  -v /tmp/.X11-unix:/tmp/.X11-unix \                    # 挂载 X11 Unix socket，实现图形界面透传
-  -v /home/jetson/temp:/ultralytics/ultralytics/temp \  # 挂载临时文件目录到 ultralytics 工作目录
-  -v /home/jetson/YoloSmartStick:/YoloSmartStick \      # 挂载 YoloSmartStick 项目源码目录
-  --device=/dev/video0 \                                # 直通 USB 摄像头设备
-  -p 9090:9090 \                                        # 映射 9090 端口
-  -p 8888:8888 \                                        # 映射 8888 端口
-  yahboomtechnology/ultralytics:1.0.3 /bin/bash         # 镜像名:标签 + 启动交互式 shell
+  --net=host \
+  --env="DISPLAY" \
+  --env="QT_X11_NO_MITSHM=1" \
+  -v /tmp/.X11-unix:/tmp/.X11-unix \
+  -v /home/jetson/temp:/ultralytics/ultralytics/temp \
+  -v /home/jetson/YoloSmartStick:/YoloSmartStick \
+  --device=/dev/video0 \
+  -p 9090:9090 \
+  -p 8888:8888 \
+  yahboomtechnology/ultralytics:1.0.3 /bin/bash
