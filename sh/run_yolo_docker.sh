@@ -39,7 +39,7 @@ docker run -it \
   -e XAUTHORITY=/root/.Xauthority \     # X11 认证文件路径
   -v ~/yolo26_data:/root/yolo26_data \  # 挂载 YOLO 数据集目录
   -v ~/yahboom_demo:/ultralytics/yahboom_demo \  # 挂载 yahboom 演示程序目录
-  -v ~/yolo_stick_logic:/root/yolo_stick_logic\  #挂载决策程序目录
+  -v ~/yolo_stick_logic:/root/yolo_stick_logic \  #挂载决策程序目录
   -v /tmp:/tmp \                        # 共享临时文件目录（X11 socket 通信需要）
   -v $HOME/.Xauthority:/root/.Xauthority:ro \     # 挂载 X11 认证文件（只读）
   -v /etc/nv_tegra_release:/etc/nv_tegra_release:ro \  # 挂载 NVIDIA Tegra 版本信息（只读）
