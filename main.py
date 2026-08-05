@@ -1,19 +1,23 @@
-import cv2
 import time
-from ultralytics import YOLO
-from multiprocessing import Process,Queue,Event
+from multiprocessing import Process, Queue, Event
 from nodes.camera import camera_worker
 from nodes.inference import inference_worker
 from nodes.logic import logic_worker
 from nodes.recorder import recorder_worker
-from config import ENABLE_RECORDER
+from config import (
+    ENABLE_RECORDER,
+    FRAME_QUEUE_MAXSIZE,
+    RESULT_QUEUE_MAXSIZE,
+    RECORDER_QUEUE_MAXSIZE,
+    STATE_QUEUE_MAXSIZE,
+)
 
 
 def main():
-    frame_q = Queue(maxsize=2) # 最多保留两帧画面，永远最新
-    result_q = Queue(maxsize=2)  # 保存最近两个结果
-    recorder_q = Queue(maxsize=2)if ENABLE_RECORDER else None  # 是否开启录制
-    state_q = Queue(maxsize=1)  # 状态机，可加在画面中
+    frame_q = Queue(maxsize=FRAME_QUEUE_MAXSIZE)
+    result_q = Queue(maxsize=RESULT_QUEUE_MAXSIZE)
+    recorder_q = Queue(maxsize=RECORDER_QUEUE_MAXSIZE) if ENABLE_RECORDER else None
+    state_q = Queue(maxsize=STATE_QUEUE_MAXSIZE)
 
     # 系统停止事件
     stop_event = Event()
@@ -28,18 +32,18 @@ def main():
     print("多进程已创建，即将启动多进程")
 
     process_cam.daemon = True
-    process_cam.start
+    process_cam.start()
 
     process_inf.daemon = True
-    process_inf.start
+    process_inf.start()
 
     process_log.daemon = True
-    process_log.start
+    process_log.start()
 
     if ENABLE_RECORDER:
         process_rec = Process(target=recorder_worker,args=(recorder_q,stop_event,state_q),name="Record")
         process_rec.daemon = True
-        process_rec.start
+        process_rec.start()
         print("开启录制")
     else:
         print("未开启录制")
@@ -57,9 +61,13 @@ def main():
     # 清理资源
     # ================================================  
 
-    process_cam.join
-    process_inf.join
-    process_log.join
+    process_cam.join()
+    process_inf.join()
+    process_log.join()
     if ENABLE_RECORDER:
-        process_rec.join
+        process_rec.join()
     print("多进程已关闭")
+
+
+if __name__ == "__main__":
+    main()
