@@ -241,7 +241,7 @@ def inference_worker(frame_q, result_q, recorder_q, stop_event):
 
     # ---- 帧计数器 & FPS 统计 ----
     frame_count = 0
-    fps_window: list[float] = []  # 最近 N 次推理耗时(ms)
+    fps_window = []  # 最近 N 次推理耗时(ms)
     fps_log_time = time.time()
 
     print("[Inference] 推理主循环已启动")

@@ -6,6 +6,7 @@
 """
 import os
 from datetime import datetime
+from typing import Dict
 
 # ============================================================
 # 摄像头参数
@@ -58,7 +59,7 @@ TARGET_CLASSES = []
 # 未在此映射中的类别 ID 会显示为 "cls_N"。
 # 示例（冰球场景）：
 # CLASS_NAMES = {0: "stick", 1: "player", 2: "puck", 3: "goal"}
-CLASS_NAMES: dict[int, str] = {}
+CLASS_NAMES: Dict[int, str] = {}
 
 # ============================================================
 # 队列参数
