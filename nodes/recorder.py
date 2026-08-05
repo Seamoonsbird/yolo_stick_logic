@@ -43,29 +43,61 @@ def _build_video_writer():
     return writer, filepath
 
 
-def _draw_state_overlay(frame, state: dict):
+def _draw_overlay(frame, state: dict, frame_count: int):
     """
-    将状态信息以文字形式叠加到帧画面右下角。
+    在帧画面上叠加信息。
+
+    左上角：时间戳 + 帧序号（始终显示，不依赖 state_q）
+    右下角：state_q 传来的状态信息（如比分、时间等，有则显示）
 
     state 示例：
         {"score": "2:1", "time": "12:34", "period": "Q2"}
-
-    每行格式：KEY: VALUE
     """
-    y_offset = frame.shape[0] - 20  # 从底部往上排
+    import datetime
+
+    h, w = frame.shape[:2]
+
+    # ---- 左上角：时间戳 + 帧序号 ----
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cv2.putText(
+        frame,
+        f"{timestamp}  |  frame #{frame_count}",
+        (10, 30),  # 左上角
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (0, 255, 0),  # 绿色
+        2,
+        cv2.LINE_AA,
+    )
+
+    # ---- 右上角：录制指示灯 ----
+    cv2.putText(
+        frame,
+        "● REC",
+        (w - 100, 30),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (0, 0, 255),  # 红色
+        2,
+        cv2.LINE_AA,
+    )
+
+    # ---- 右下角：state_q 传来的额外状态 ----
+    y_offset = h - 20
     for key, value in reversed(list(state.items())):
         text = f"{key}: {value}"
         cv2.putText(
             frame,
             text,
-            (frame.shape[1] - 250, y_offset),  # 右下角
+            (w - 250, y_offset),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
-            (0, 255, 0),  # 绿色
+            (0, 255, 0),
             2,
             cv2.LINE_AA,
         )
-        y_offset -= 25  # 每行往上偏移
+        y_offset -= 25
+
     return frame
 
 
@@ -87,8 +119,9 @@ def recorder_worker(recorder_q, stop_event, state_q):
     writer, filepath = _build_video_writer()
     print(f"[Recorder] 视频文件已创建: {filepath}")
 
-    # 当前状态缓存（始终保留最新一条）
-    current_state = {}
+    # 当前状态缓存 + 帧计数器
+    current_state: dict = {}
+    frame_count = 0
 
     try:
         while not stop_event.is_set():
@@ -103,11 +136,11 @@ def recorder_worker(recorder_q, stop_event, state_q):
             try:
                 frame = recorder_q.get(timeout=0.5)
             except queue.Empty:
-                continue  # 没帧可录，回去接着等
+                continue
 
-            # ---- 步骤 3：叠加状态文字 ----
-            if current_state:
-                frame = _draw_state_overlay(frame, current_state)
+            # ---- 步骤 3：叠加信息（始终执行） ----
+            frame_count += 1
+            frame = _draw_overlay(frame, current_state, frame_count)
 
             # ---- 步骤 4：写入视频文件 ----
             writer.write(frame)
@@ -121,8 +154,8 @@ def recorder_worker(recorder_q, stop_event, state_q):
                 frame = recorder_q.get_nowait()
             except queue.Empty:
                 break
-            if current_state:
-                frame = _draw_state_overlay(frame, current_state)
+            frame_count += 1
+            frame = _draw_overlay(frame, current_state, frame_count)
             writer.write(frame)
 
     finally:
