@@ -28,14 +28,17 @@ class GstPipeCapture:
             stderr=subprocess.DEVNULL,
             bufsize=self.frame_bytes * 2,
         )
-    # 判断摄像头状态函数
+        # 告知类型检查器：传入 stdout=PIPE 后 stdout 不会是 None
+        assert self._proc.stdout is not None
+
     def isOpened(self):
         return self._proc.poll() is None
-    # 读取图像
+
     def read(self):
+        assert self._proc.stdout is not None
         raw = b""
         while len(raw) < self.frame_bytes:
-            chunk = self._proc.stdout.read(self.frame_bytes -len(raw))
+            chunk = self._proc.stdout.read(self.frame_bytes - len(raw))
             if not chunk:
                 return False, None
             raw += chunk
@@ -118,6 +121,7 @@ def open_jetson_csi_capture(sensor_id=0,width = 640, height = 480,fps = 30):
         if cap._proc.poll() is not None:
             break
 
+        assert cap._proc.stdout is not None
         fd = cap._proc.stdout.fileno()
         try:
             ready, _, _ = select.select([fd],[],[],0.2)

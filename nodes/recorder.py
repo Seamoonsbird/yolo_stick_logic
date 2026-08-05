@@ -26,8 +26,9 @@ def _build_video_writer():
     out_dir = get_output_dir()
     filepath = f"{out_dir}/record.mp4"
 
-    # fourcc: 四个字符的编码标识，cv2.VideoWriter_fourcc 负责转换
-    fourcc = cv2.VideoWriter_fourcc(*RECORDER_CODEC)
+    # fourcc: 四个字符的编码标识。
+    # pyright 的 cv2 stub 未包含此 C 扩展函数，忽略类型检查
+    fourcc = cv2.VideoWriter_fourcc(*RECORDER_CODEC)  # pyright: ignore[reportAttributeAccessIssue]
 
     writer = cv2.VideoWriter(
         filepath,
