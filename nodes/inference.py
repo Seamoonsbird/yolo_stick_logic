@@ -21,15 +21,26 @@ from config import (
 )
 
 
+# 模型内置类别名（从 model.names 读取，自动获取正确的类别名）
+_model_names: dict = {}
+
+
 def _class_name(cls_id: int) -> str:
+    """优先用模型内置名字，其次 config.CLASS_NAMES，最后 cls_N。"""
+    if cls_id in _model_names:
+        return _model_names[cls_id]
     return CLASS_NAMES.get(cls_id, f"cls_{cls_id}")
 
 
 def _load_model():
-    """加载 YOLO 模型并预热。"""
+    """加载 YOLO 模型并预热，同时读取模型内置类别名。"""
+    global _model_names
+
     print(f"[Inference] 加载模型: {MODEL_PATH}  (device={DEVICE}, fp16={USE_FP16})")
 
     model = YOLO(MODEL_PATH)
+    _model_names = model.names or {}  # 模型自带的类别名，如 {0:'stick', 1:'player'}
+    print(f"[Inference] 类别: {_model_names}")
 
     print("[Inference] 预热中...")
     dummy = np.zeros((480, 640, 3), dtype=np.uint8)
