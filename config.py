@@ -51,8 +51,14 @@ DEVICE = "cuda"
 USE_FP16 = True
 
 # 目标类别 ID 列表。留空 [] 表示检测所有类别。
-# YOLO 默认 0=person, 等等。按需要填写。
 TARGET_CLASSES = []
+
+# 自定义类别名映射（你的 origin.onnx 是自己训练的模型，不是 COCO 80 类）。
+# 按你的模型实际类别填写，格式：{类别ID: "名称", ...}
+# 未在此映射中的类别 ID 会显示为 "cls_N"。
+# 示例（冰球场景）：
+# CLASS_NAMES = {0: "stick", 1: "player", 2: "puck", 3: "goal"}
+CLASS_NAMES: dict[int, str] = {}
 
 # ============================================================
 # 队列参数

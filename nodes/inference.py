@@ -18,32 +18,19 @@ from config import (
     DEVICE,
     USE_FP16,
     TARGET_CLASSES,
+    CLASS_NAMES,
     PRINT_FPS,
 )
 
 
-# YOLO 类别名（COCO 数据集的 80 类）
-# 仅在 TARGET_CLASSES 为空（检测所有类别）时用于标注框上的文字
-COCO_NAMES = {
-    0: "person", 1: "bicycle", 2: "car", 3: "motorcycle", 4: "airplane",
-    5: "bus", 6: "train", 7: "truck", 8: "boat", 9: "traffic light",
-    10: "fire hydrant", 11: "stop sign", 12: "parking meter", 13: "bench",
-    14: "bird", 15: "cat", 16: "dog", 17: "horse", 18: "sheep", 19: "cow",
-    20: "elephant", 21: "bear", 22: "zebra", 23: "giraffe", 24: "backpack",
-    25: "umbrella", 26: "handbag", 27: "tie", 28: "suitcase", 29: "frisbee",
-    30: "skis", 31: "snowboard", 32: "sports ball", 33: "kite",
-    34: "baseball bat", 35: "baseball glove", 36: "skateboard",
-    37: "surfboard", 38: "tennis racket", 39: "bottle", 40: "wine glass",
-    41: "cup", 42: "fork", 43: "knife", 44: "spoon", 45: "bowl",
-    46: "banana", 47: "apple", 48: "sandwich", 49: "orange", 50: "broccoli",
-    51: "carrot", 52: "hot dog", 53: "pizza", 54: "donut", 55: "cake",
-    56: "chair", 57: "couch", 58: "potted plant", 59: "bed",
-    60: "dining table", 61: "toilet", 62: "tv", 63: "laptop", 64: "mouse",
-    65: "remote", 66: "keyboard", 67: "cell phone", 68: "microwave",
-    69: "oven", 70: "toaster", 71: "sink", 72: "refrigerator", 73: "book",
-    74: "clock", 75: "vase", 76: "scissors", 77: "teddy bear",
-    78: "hair drier", 79: "toothbrush",
-}
+def _class_name(cls_id: int) -> str:
+    """
+    返回类别 ID 对应的名称。
+
+    优先使用 config.CLASS_NAMES（自定义模型），
+    未定义则返回 "cls_N" 格式。
+    """
+    return CLASS_NAMES.get(cls_id, f"cls_{cls_id}")
 
 
 def _load_model():
@@ -107,7 +94,7 @@ def _draw_boxes(frame: np.ndarray, results) -> np.ndarray:
             continue
 
         # 类别名
-        label = COCO_NAMES.get(cls_id, f"cls_{cls_id}")
+        label = _class_name(cls_id)
         text = f"{label} {conf:.2f}"
 
         # 框的颜色（按类别 ID 变化，保证不同类别颜色不同）
@@ -177,7 +164,7 @@ def _extract_results(results) -> list:
             "box": [float(v) for v in xyxy[i]],
             "cls": cls_id,
             "conf": conff,
-            "name": COCO_NAMES.get(cls_id, f"cls_{cls_id}"),
+            "name": _class_name(cls_id),
         })
 
     return detections
