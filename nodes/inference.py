@@ -48,7 +48,7 @@ COCO_NAMES = {
 
 def _load_model():
     """
-    加载 YOLO 模型。
+    加载 YOLO 模型（支持 .pt / .onnx / .engine 等格式）。
 
     在子进程内调用，避免通过 pickle 序列化模型（multiprocessing 不支持）。
     """
@@ -57,18 +57,23 @@ def _load_model():
 
     model = YOLO(MODEL_PATH)
 
-    # 预热模型：跑一次空推理，触发 CUDA kernel 编译和模型加载到显存
-    print("[Inference] 预热模型中（首次推理较慢）...")
-    dummy = np.zeros((480, 640, 3), dtype=np.uint8)
-    model(
-        dummy,
-        conf=CONF_THRESHOLD,
-        iou=IOU_THRESHOLD,
-        device=DEVICE,
-        half=USE_FP16 and DEVICE == "cuda",
-        verbose=False,
-    )
-    print("[Inference] 模型加载完毕，开始推理")
+    # ONNX 模型不需要预热（没有 CUDA kernel 编译），直接开始推理
+    is_onnx = MODEL_PATH.endswith(".onnx")
+    if is_onnx:
+        print("[Inference] ONNX 模型加载完毕，开始推理")
+    else:
+        # 预热模型：跑一次空推理，触发 CUDA kernel 编译和模型加载到显存
+        print("[Inference] 预热模型中（首次推理较慢）...")
+        dummy = np.zeros((480, 640, 3), dtype=np.uint8)
+        model(
+            dummy,
+            conf=CONF_THRESHOLD,
+            iou=IOU_THRESHOLD,
+            device=DEVICE,
+            half=USE_FP16 and DEVICE == "cuda",
+            verbose=False,
+        )
+        print("[Inference] 模型加载完毕，开始推理")
 
     return model
 
@@ -178,6 +183,32 @@ def _extract_results(results) -> list:
     return detections
 
 
+def _print_detections(frame_count: int, t_ms: float, detections: list):
+    """
+    每帧打印检测结果到控制台。
+
+    输出格式：
+        #128 | 198ms | person: box[100,200,300,400] area=20000 | 0.87
+        #128 | 198ms | 0 objects
+    """
+    dt_str = f"{t_ms:.0f}ms"
+
+    if not detections:
+        print(f"[Inference] #{frame_count} | {dt_str} | 0 objects")
+        return
+
+    parts = []
+    for d in detections:
+        x1, y1, x2, y2 = d["box"]
+        area = (x2 - x1) * (y2 - y1)
+        parts.append(
+            f"{d['name']}: box[{x1:.0f},{y1:.0f},{x2:.0f},{y2:.0f}] "
+            f"area={area:.0f} | {d['conf']:.2f}"
+        )
+
+    print(f"[Inference] #{frame_count} | {dt_str} | " + "  |  ".join(parts))
+
+
 def _put_result(result_q, detections: list):
     """
     将检测结果放入结果队列（保持最新策略）。
@@ -213,9 +244,11 @@ def inference_worker(frame_q, result_q, recorder_q, stop_event):
     """
     # ---- 模型加载（在子进程内，避免 pickle） ----
     model = _load_model()
+    is_onnx = MODEL_PATH.endswith(".onnx")
 
-    # ---- FPS 统计 ----
-    fps_window = []  # 最近 N 次推理耗时
+    # ---- 帧计数器 & FPS 统计 ----
+    frame_count = 0
+    fps_window: list[float] = []  # 最近 N 次推理耗时(ms)
     fps_log_time = time.time()
 
     print("[Inference] 推理主循环已启动")
@@ -229,16 +262,29 @@ def inference_worker(frame_q, result_q, recorder_q, stop_event):
 
         # ---- 步骤 2：YOLO 推理 ----
         t_start = time.time()
-        results_list = model(
-            frame,
-            conf=CONF_THRESHOLD,
-            iou=IOU_THRESHOLD,
-            device=DEVICE,
-            half=USE_FP16 and DEVICE == "cuda",
-            verbose=False,
-        )
+
+        # ONNX 模型不支持 half 参数
+        if is_onnx:
+            results_list = model(
+                frame,
+                conf=CONF_THRESHOLD,
+                iou=IOU_THRESHOLD,
+                device=DEVICE,
+                verbose=False,
+            )
+        else:
+            results_list = model(
+                frame,
+                conf=CONF_THRESHOLD,
+                iou=IOU_THRESHOLD,
+                device=DEVICE,
+                half=USE_FP16 and DEVICE == "cuda",
+                verbose=False,
+            )
+
         results = results_list[0]  # 单帧推理，取第一个
         t_infer = (time.time() - t_start) * 1000  # 毫秒
+        frame_count += 1
 
         # ---- 步骤 3：绘制检测框 ----
         annotated = _draw_boxes(frame, results)
@@ -248,16 +294,19 @@ def inference_worker(frame_q, result_q, recorder_q, stop_event):
         _put_result(result_q, detections)     # CPU 数据 → 逻辑进程
         _put_frame(recorder_q, annotated)     # 标注画面 → 录制进程
 
-        # ---- FPS 统计 ----
+        # ---- 步骤 5：每帧打印检测结果 ----
+        _print_detections(frame_count, t_infer, detections)
+
+        # ---- FPS 汇总统计 ----
         fps_window.append(t_infer)
         if PRINT_FPS and len(fps_window) >= 30:
             now = time.time()
             if now - fps_log_time >= 5.0:
                 avg = sum(fps_window) / len(fps_window)
                 fps = 1000 / avg if avg > 0 else 0
-                print(f"[Inference] 近 {len(fps_window)} 帧  |  "
-                      f"平均推理: {avg:.1f}ms  |  FPS: {fps:.0f}")
+                print(f"[Inference] === 近 {len(fps_window)} 帧汇总 | "
+                      f"平均推理: {avg:.1f}ms | FPS: {fps:.0f} ===")
                 fps_window.clear()
                 fps_log_time = now
 
-    print("[Inference] 推理进程已退出")
+    print(f"[Inference] 推理进程已退出 (共处理 {frame_count} 帧)")
