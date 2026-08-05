@@ -76,7 +76,7 @@ cap, _opened_via = open_jetson_csi_capture(
 #   fps         → 输出视频帧率（与输入帧率保持一致）
 #   (width, height) → 输出视频分辨率（与输入分辨率保持一致）
 output_path = "/root/yolo26_data/output/02.segmentation_camera_csi.mp4"
-fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # pyright: ignore[reportAttributeAccessIssue]
 out = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height))
 
 # ============================================================================

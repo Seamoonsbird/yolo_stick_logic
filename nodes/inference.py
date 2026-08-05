@@ -136,16 +136,58 @@ def _class_color(cls_id: int) -> tuple:
     return tuple(int(c) for c in bgr)
 
 
-def _put_result(result_q, results):
+def _extract_results(results) -> list:
     """
-    将推理结果放入结果队列（保持最新策略）。
+    从 ultralytics Results 对象中提取检测数据到 CPU 纯 Python 结构。
+
+    必须做这一步：result_q 通过 pickle 序列化跨进程传递，
+    GPU tensor（CUDA）无法被 pickle，必须 .cpu() 搬到 CPU 并转成
+    普通 Python 类型后再入队。
+
+    返回格式：
+        [
+            {"box": [x1, y1, x2, y2], "cls": int, "conf": float, "name": str},
+            ...
+        ]
+    """
+    detections = []
+
+    if results.boxes is None:
+        return detections
+
+    boxes = results.boxes
+    xyxy = boxes.xyxy.cpu().tolist() if boxes.xyxy is not None else []
+    cls_ids = boxes.cls.cpu().tolist() if boxes.cls is not None else []
+    confs = boxes.conf.cpu().tolist() if boxes.conf is not None else []
+
+    for i in range(len(xyxy)):
+        cls_id = int(cls_ids[i])
+        conff = float(confs[i])
+
+        # 类别过滤
+        if TARGET_CLASSES and cls_id not in TARGET_CLASSES:
+            continue
+
+        detections.append({
+            "box": [float(v) for v in xyxy[i]],
+            "cls": cls_id,
+            "conf": conff,
+            "name": COCO_NAMES.get(cls_id, f"cls_{cls_id}"),
+        })
+
+    return detections
+
+
+def _put_result(result_q, detections: list):
+    """
+    将检测结果放入结果队列（保持最新策略）。
     """
     if result_q.full():
         try:
             result_q.get_nowait()
         except queue.Empty:
             pass
-    result_q.put(results)
+    result_q.put(detections)
 
 
 def _put_frame(recorder_q, frame):
@@ -201,8 +243,9 @@ def inference_worker(frame_q, result_q, recorder_q, stop_event):
         # ---- 步骤 3：绘制检测框 ----
         annotated = _draw_boxes(frame, results)
 
-        # ---- 步骤 4：分发结果 ----
-        _put_result(result_q, results)        # 原始结果 → 逻辑进程
+        # ---- 步骤 4：提取检测数据（GPU → CPU）并分发 ----
+        detections = _extract_results(results)
+        _put_result(result_q, detections)     # CPU 数据 → 逻辑进程
         _put_frame(recorder_q, annotated)     # 标注画面 → 录制进程
 
         # ---- FPS 统计 ----
