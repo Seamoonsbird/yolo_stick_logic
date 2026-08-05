@@ -185,11 +185,15 @@ def _extract_results(results) -> list:
 
 def _print_detections(frame_count: int, t_ms: float, detections: list):
     """
-    每帧打印检测结果到控制台。
+    每帧打印检测结果到控制台，每个物体独占一行。
 
     输出格式：
-        #128 | 198ms | person: box[100,200,300,400] area=20000 | 0.87
-        #128 | 198ms | 0 objects
+        [Inference] #128 | 198ms
+          person    0.87  box[ 100, 200, 300, 400]  area= 20000
+          car       0.72  box[  50,  60, 150, 200]  area= 14000
+
+    无检测时：
+        [Inference] #128 | 198ms | 0 objects
     """
     dt_str = f"{t_ms:.0f}ms"
 
@@ -197,16 +201,18 @@ def _print_detections(frame_count: int, t_ms: float, detections: list):
         print(f"[Inference] #{frame_count} | {dt_str} | 0 objects")
         return
 
-    parts = []
+    # 帧头行
+    print(f"[Inference] #{frame_count} | {dt_str}")
+
+    # 每个检测结果一行，列对齐
     for d in detections:
         x1, y1, x2, y2 = d["box"]
         area = (x2 - x1) * (y2 - y1)
-        parts.append(
-            f"{d['name']}: box[{x1:.0f},{y1:.0f},{x2:.0f},{y2:.0f}] "
-            f"area={area:.0f} | {d['conf']:.2f}"
+        print(
+            f"  {d['name']:<12s} {d['conf']:.2f}  "
+            f"box[{x1:4.0f},{y1:4.0f},{x2:4.0f},{y2:4.0f}]  "
+            f"area={area:7.0f}"
         )
-
-    print(f"[Inference] #{frame_count} | {dt_str} | " + "  |  ".join(parts))
 
 
 def _put_result(result_q, detections: list):

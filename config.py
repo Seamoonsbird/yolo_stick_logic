@@ -37,7 +37,7 @@ USB_CAMERA_INDEX = 0
 MODEL_PATH = "./models/origin.onnx"
 
 # 置信度阈值：低于此值的检测结果直接丢弃
-CONF_THRESHOLD = 0.5
+CONF_THRESHOLD = 0.6  # 低于此值的检测结果直接丢弃
 
 # IoU 阈值：NMS（非极大值抑制）时使用
 IOU_THRESHOLD = 0.45
