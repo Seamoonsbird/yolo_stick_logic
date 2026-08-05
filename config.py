@@ -84,8 +84,8 @@ ENABLE_RECORDER = True
 #   "XVID" → .avi 文件
 RECORDER_CODEC = "mp4v"
 
-# 录制帧率
-RECORDER_FPS = 30
+# 录制帧率由 recorder 根据前两帧实际到达间隔自动测量，无需硬编码。
+# 如果头两帧间隔就是 5fps，视频就标 5fps——播放速度 = 真实速度。
 
 # 录制分辨率（默认跟随摄像头分辨率）
 RECORDER_WIDTH = CAMERA_WIDTH

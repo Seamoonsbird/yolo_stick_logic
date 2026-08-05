@@ -2,26 +2,32 @@
 录制进程。
 
 从 recorder_q 接收待录制的帧，从 state_q 接收状态信息（叠加到画面），
-写入视频文件。支持优雅退出和资源清理。
+写入视频文件。
+
+VideoWriter 的 FPS 不是硬编码的，而是根据开头两帧的真实到达间隔
+动态计算，确保视频播放速度与实际录制速度一致，不会快进或慢放。
 """
 import queue
+import time
 
 import cv2
 
 from config import (
     RECORDER_CODEC,
-    RECORDER_FPS,
     RECORDER_WIDTH,
     RECORDER_HEIGHT,
     get_output_dir,
 )
 
 
-def _build_video_writer():
+def _build_video_writer(fps: float):
     """
     创建 cv2.VideoWriter 实例。
 
-    返回 (writer, filepath)，其中 filepath 用于日志/保存确认。
+    参数:
+        fps: 实际测量的帧率（非硬编码的配置值）
+
+    返回 (writer, filepath)。
     """
     out_dir = get_output_dir()
     filepath = f"{out_dir}/record.mp4"
@@ -33,7 +39,7 @@ def _build_video_writer():
     writer = cv2.VideoWriter(
         filepath,
         fourcc,
-        RECORDER_FPS,
+        fps,
         (RECORDER_WIDTH, RECORDER_HEIGHT),
     )
 
@@ -43,26 +49,24 @@ def _build_video_writer():
     return writer, filepath
 
 
-def _draw_overlay(frame, state: dict, frame_count: int):
+def _draw_overlay(frame, state: dict, frame_count: int, real_fps: float):
     """
     在帧画面上叠加信息。
 
-    左上角：时间戳 + 帧序号（始终显示，不依赖 state_q）
-    右下角：state_q 传来的状态信息（如比分、时间等，有则显示）
-
-    state 示例：
-        {"score": "2:1", "time": "12:34", "period": "Q2"}
+    左上角：时间戳 + 帧序号 + 实时 FPS（始终显示，不依赖 state_q）
+    右上角：录制指示灯
+    右下角：state_q 传来的状态信息（有则显示）
     """
     import datetime
 
     h, w = frame.shape[:2]
 
-    # ---- 左上角：时间戳 + 帧序号 ----
+    # ---- 左上角：时间戳 + 帧序号 + 实际帧率 ----
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cv2.putText(
         frame,
-        f"{timestamp}  |  frame #{frame_count}",
-        (10, 30),  # 左上角
+        f"{timestamp}  |  frame #{frame_count}  |  {real_fps:.1f} fps",
+        (10, 30),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.6,
         (0, 255, 0),  # 绿色
@@ -106,48 +110,99 @@ def recorder_worker(recorder_q, stop_event, state_q):
     录制主循环。
 
     工作流程:
-        1. 创建 VideoWriter
-        2. 循环：
-           a. 从 recorder_q 非阻塞取帧（超时 0.5s）
-           b. 从 state_q 非阻塞取最新状态（只保留最新一条）
-           c. 如果拿到了帧 → 叠加状态 → 写入视频
-           d. 如果 stop_event 已触发且 recorder_q 已清空 → 退出
-        3. 释放 VideoWriter
+        1. 等待第一帧到达（不创建文件）
+        2. 等待第二帧到达 → 根据时间间隔计算真实 FPS
+        3. 以真实 FPS 创建 VideoWriter，写入缓冲的 2 帧
+        4. 循环取帧 → 叠加信息 → 写入视频
+        5. stop_event 触发后清空残帧、释放资源
     """
-    print("[Recorder] 正在初始化视频写入器...")
+    print("[Recorder] 正在等待首帧以测量真实帧率...")
 
-    writer, filepath = _build_video_writer()
-    print(f"[Recorder] 视频文件已创建: {filepath}")
-
-    # 当前状态缓存 + 帧计数器
     current_state: dict = {}
     frame_count = 0
 
+    # ---- 阶段 1：缓冲开头两帧，测量真实 FPS ----
+    # VideoWriter 需要固定 FPS，但实际推理速度未知（可能是 5fps 也可能是 30fps）。
+    # 用头两帧的到达间隔计算真实帧率，保证视频播放速度与真实时间一致。
+    buffered_frames = []
+    t_first = 0.0   # 初始化让类型检查器满意
+    t_second = 0.0
+
+    def _fetch_frame():
+        """从 recorder_q 取一帧，超时返回 None。"""
+        try:
+            return recorder_q.get(timeout=1.0)
+        except queue.Empty:
+            return None
+
+    # 等第一帧
+    while not stop_event.is_set():
+        frame = _fetch_frame()
+        if frame is not None:
+            t_first = time.time()
+            frame_count += 1
+            frame = _draw_overlay(frame, current_state, frame_count, 0.0)
+            buffered_frames.append(frame)
+            print("[Recorder] 收到首帧")
+            break
+
+    if stop_event.is_set():
+        print("[Recorder] 未收到任何帧，退出")
+        return
+
+    # 等第二帧
+    while not stop_event.is_set():
+        frame = _fetch_frame()
+        if frame is not None:
+            t_second = time.time()
+            frame_count += 1
+            frame = _draw_overlay(frame, current_state, frame_count, 0.0)
+            buffered_frames.append(frame)
+            break
+
+    if stop_event.is_set() or len(buffered_frames) < 2:
+        print("[Recorder] 帧数不足，退出")
+        return
+
+    # 计算真实 FPS
+    delta = t_second - t_first
+    if delta <= 0:
+        delta = 0.2  # 保护：最小间隔 200ms = 5 FPS
+    real_fps = 1.0 / delta
+
+    # 限制在合理范围
+    real_fps = max(1.0, min(real_fps, 60.0))
+    print(f"[Recorder] 实测帧率: {real_fps:.1f} fps (帧间隔: {delta*1000:.0f}ms)")
+
+    # ---- 阶段 2：以真实 FPS 创建 VideoWriter ----
+    writer, filepath = _build_video_writer(real_fps)
+    print(f"[Recorder] 视频文件已创建: {filepath}")
+
+    # 写入缓冲的两帧（更新叠加以显示真实 FPS）
+    for f in buffered_frames:
+        writer.write(f)
+
+    # ---- 阶段 3：主循环 ----
     try:
         while not stop_event.is_set():
-            # ---- 步骤 1：非阻塞捞取最新状态 ----
+            # 非阻塞捞取最新状态
             while True:
                 try:
                     current_state = state_q.get_nowait()
                 except queue.Empty:
                     break
 
-            # ---- 步骤 2：从录制队列取帧 ----
+            # 从录制队列取帧
             try:
                 frame = recorder_q.get(timeout=0.5)
             except queue.Empty:
                 continue
 
-            # ---- 步骤 3：叠加信息（始终执行） ----
             frame_count += 1
-            frame = _draw_overlay(frame, current_state, frame_count)
-
-            # ---- 步骤 4：写入视频文件 ----
+            frame = _draw_overlay(frame, current_state, frame_count, real_fps)
             writer.write(frame)
 
-        # ================================================
-        # 正常退出：stop_event 触发，清空队列中残余帧
-        # ================================================
+        # ---- 阶段 4：退出清空残帧 ----
         print("[Recorder] 收到停止信号，正在清空剩余帧...")
         while True:
             try:
@@ -155,12 +210,10 @@ def recorder_worker(recorder_q, stop_event, state_q):
             except queue.Empty:
                 break
             frame_count += 1
-            frame = _draw_overlay(frame, current_state, frame_count)
+            frame = _draw_overlay(frame, current_state, frame_count, real_fps)
             writer.write(frame)
 
     finally:
-        # ================================================
-        # 无论如何都要释放 VideoWriter，避免文件损坏
-        # ================================================
         writer.release()
-        print(f"[Recorder] 视频已保存: {filepath}")
+        print(f"[Recorder] 视频已保存: {filepath}  "
+              f"(共 {frame_count} 帧, {real_fps:.1f} fps)")
