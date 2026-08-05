@@ -34,7 +34,7 @@ USB_CAMERA_INDEX = 0
 # ============================================================
 
 # 模型文件路径（支持 .pt / .engine / .onnx 等格式）
-MODEL_PATH = "./models/origin.onnx"
+MODEL_PATH = "./models/origin.pt"
 
 # 置信度阈值：低于此值的检测结果直接丢弃
 CONF_THRESHOLD = 0.6  # 低于此值的检测结果直接丢弃
