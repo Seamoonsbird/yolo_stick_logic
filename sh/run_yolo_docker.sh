@@ -26,6 +26,14 @@ for dev in /dev/video*; do
   [ -e "$dev" ] && VIDEO_DEVICES="$VIDEO_DEVICES --device=$dev"
 done
 
+# --- 声卡设备检测 ---
+# 动态检测 /dev/snd/* 设备（用于盲杖 TTS 语音播报）
+# 虽然 --privileged 已能访问所有设备，但显式挂载更清晰
+AUDIO_DEVICES=""
+for dev in /dev/snd/*; do
+  [ -e "$dev" ] && AUDIO_DEVICES="$AUDIO_DEVICES --device=$dev"
+done
+
 # --- 启动 Docker 容器 ---
 # 各参数说明：
 #   --net=host            使用宿主机网络栈（性能更好，但端口直接暴露）
@@ -61,4 +69,5 @@ docker run -it \
   -v $HOME/.Xauthority:/root/.Xauthority:ro \
   -v /etc/nv_tegra_release:/etc/nv_tegra_release:ro \
   $VIDEO_DEVICES \
+  $AUDIO_DEVICES \
   yahboomtechnology/ultralytics:1.0.4 /bin/bash
