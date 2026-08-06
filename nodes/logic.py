@@ -65,45 +65,43 @@ DANGER_ZONE_Y = FRAME_HEIGHT * 4 // 5                    # y2 > 384 = 危险距�
 # ---- 告警冷却时间（秒），防止频繁重复提醒 ----
 ALERT_COOLDOWN = {
     "blind_path":   3.0,    # 盲道偏移提醒
-    "stairs_up":    3.0,    # 上楼梯
-    "stairs_down":  3.0,    # 下楼梯
-    "puddle":       2.0,    # 水坑（高频危险）
-    "manhole":      2.0,    # 井盖（高频危险）
+    "upstairs":     3.0,    # 上楼梯
+    "downstairs":   3.0,    # 下楼梯
+    "water":        2.0,    # 水坑（高频危险）
+    "well_lid":     2.0,    # 井盖（高频危险）
     "grass":        5.0,    # 草地（场景变化）
-    "crosswalk":    5.0,    # 斑马线（场景变化）
     "general":      1.5,    # 通用最短间隔
 }
 
 # ==========================================
 # 类别名映射（需与模型训练时的类别名一致）
+# 模型类别: {0: 'blind_path', 1: 'well_lid', 2: 'grass', 3: 'downstairs', 4: 'upstairs', 5: 'water'}
 # ==========================================
 
 # 盲道
 CLASS_BLIND_PATH = "blind_path"
 
 # 楼梯
-CLASS_STAIRS_UP = "stairs_up"
-CLASS_STAIRS_DOWN = "stairs_down"
+CLASS_UPSTAIRS = "upstairs"
+CLASS_DOWNSTAIRS = "downstairs"
 
 # 障碍物
-CLASS_PUDDLE = "puddle"
-CLASS_MANHOLE = "manhole"
+CLASS_WATER = "water"
+CLASS_WELL_LID = "well_lid"
 
 # 地形（仅正前方提醒）
 CLASS_GRASS = "grass"
-CLASS_CROSSWALK = "crosswalk"
 
 # ---- 按类别分组，方便批量处理 ----
 HAZARD_CLASSES = {
-    CLASS_STAIRS_UP:   "上楼梯",
-    CLASS_STAIRS_DOWN: "下楼梯",
-    CLASS_PUDDLE:      "水坑",
-    CLASS_MANHOLE:     "井盖",
+    CLASS_UPSTAIRS:   "上楼梯",
+    CLASS_DOWNSTAIRS: "下楼梯",
+    CLASS_WATER:      "水坑",
+    CLASS_WELL_LID:   "井盖",
 }
 
 TERRAIN_CLASSES = {
-    CLASS_GRASS:     "草地",
-    CLASS_CROSSWALK: "斑马线",
+    CLASS_GRASS: "草地",
 }
 
 
@@ -174,8 +172,8 @@ def classify_detections(det_results):
       }
     """
     groups = {k: [] for k in (
-        CLASS_BLIND_PATH, CLASS_STAIRS_UP, CLASS_STAIRS_DOWN,
-        CLASS_PUDDLE, CLASS_MANHOLE, CLASS_GRASS, CLASS_CROSSWALK,
+        CLASS_BLIND_PATH, CLASS_UPSTAIRS, CLASS_DOWNSTAIRS,
+        CLASS_WATER, CLASS_WELL_LID, CLASS_GRASS,
     )}
 
     for det in det_results:
@@ -400,7 +398,7 @@ def handle_stairs(groups, alert_mgr, status: dict):
     - 中距离楼梯 → 提前预警
     """
     for cls_name, label in HAZARD_CLASSES.items():
-        if "stairs" not in cls_name:
+        if cls_name not in (CLASS_UPSTAIRS, CLASS_DOWNSTAIRS):
             continue
 
         detections = groups.get(cls_name, [])
@@ -433,8 +431,8 @@ def handle_obstacles(groups, alert_mgr, status: dict):
     - 侧前方 → 仅记录不告警
     """
     for cls_name, label in [
-        (CLASS_PUDDLE, "水坑"),
-        (CLASS_MANHOLE, "井盖"),
+        (CLASS_WATER, "水坑"),
+        (CLASS_WELL_LID, "井盖"),
     ]:
         detections = groups.get(cls_name, [])
         if not detections:
@@ -456,13 +454,12 @@ def handle_obstacles(groups, alert_mgr, status: dict):
 
 def handle_terrain(groups, alert_mgr, status: dict):
     """
-    草地/斑马线检测：仅正前方提醒，侧前方忽略。
+    草地检测：仅正前方提醒，侧前方忽略。
     - 正前方 + 近距离 → 提醒地面变化
     - 侧前方 → 不提醒（用户不会走到侧面草地）
     """
     for cls_name, label in [
         (CLASS_GRASS, "草地"),
-        (CLASS_CROSSWALK, "斑马线"),
     ]:
         detections = groups.get(cls_name, [])
         if not detections:
@@ -481,20 +478,15 @@ def handle_terrain(groups, alert_mgr, status: dict):
         if nearest is None:
             continue
 
-        _, y2 = box_bottom_center(nearest["box"])
-
         if is_danger_close(nearest["box"]):
             status[label] = "⚠️正前方近距离"
-            if cls_name == CLASS_CROSSWALK:
-                speak(f"前方斑马线，请注意来往车辆", cls_name, alert_mgr)
-            else:
-                speak(f"前方草地，请注意脚下", cls_name, alert_mgr)
+            speak(f"前方草地，请注意脚下", cls_name, alert_mgr)
         elif is_nearby(nearest["box"]):
             status[label] = "🔶正前方"
             speak(f"前方{label}，请注意", cls_name, alert_mgr)
         else:
-            status[label] = f"前方远处(y2={int(y2)})"
             # 远处不提醒，避免频繁干扰
+            status[label] = "前方远处"
 
 
 # ==========================================
