@@ -68,6 +68,8 @@ docker run -it \
   -v /tmp:/tmp \
   -v $HOME/.Xauthority:/root/.Xauthority:ro \
   -v /etc/nv_tegra_release:/etc/nv_tegra_release:ro \
+  -v /etc/localtime:/etc/localtime:ro \
+  -e TZ=Asia/Shanghai \
   $VIDEO_DEVICES \
   $AUDIO_DEVICES \
   yahboomtechnology/ultralytics:1.0.4 /bin/bash

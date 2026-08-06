@@ -4,13 +4,20 @@
 从 recorder_q 接收待录制的帧，从 state_q 接收状态信息（叠加到画面），
 写入视频文件。
 
-VideoWriter 的 FPS 不是硬编码的，而是根据开头两帧的真实到达间隔
-动态计算，确保视频播放速度与实际录制速度一致，不会快进或慢放。
+变更:
+  - PIL 渲染中文（替换 OpenCV putText，解决中文问号问题）
+  - 文件名带时间戳，不覆盖旧视频
+  - 显示最近告警文案
+  - VideoWriter FPS 根据头两帧到达间隔动态计算
 """
+
 import queue
 import time
+import datetime
+import os
 
 import cv2
+import numpy as np
 
 from config import (
     RECORDER_CODEC,
@@ -19,21 +26,116 @@ from config import (
     get_output_dir,
 )
 
+# ==========================================
+# 中文字体检测
+# ==========================================
+
+# 按优先级排列的 CJK 字体路径（Ubuntu / Jetson 常见位置）
+_CJK_FONT_PATHS = [
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttf",
+    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+    "/usr/share/fonts/truetype/arphic/uming.ttc",
+    "/usr/share/fonts/truetype/arphic/ukai.ttc",
+    # Jetson 常见
+    "/usr/share/fonts/truetype/ttf-dejavu/DejaVuSans.ttf",  # 无中文，兜底
+]
+
+# PIL 字体缓存
+_pil_fonts: dict[int, object] = {}  # size -> ImageFont
+_pil_font_path: str | None = None
+
+
+def _find_cjk_font() -> str | None:
+    """查找第一个可用的 CJK 字体。"""
+    for path in _CJK_FONT_PATHS:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _get_font(size: int):
+    """获取指定大小的 PIL 字体（带缓存）。"""
+    global _pil_font_path
+    if size in _pil_fonts:
+        return _pil_fonts[size]
+
+    if _pil_font_path is None:
+        _pil_font_path = _find_cjk_font()
+
+    try:
+        from PIL import ImageFont
+        if _pil_font_path:
+            font = ImageFont.truetype(_pil_font_path, size)
+        else:
+            font = ImageFont.load_default()
+        _pil_fonts[size] = font
+        return font
+    except Exception:
+        from PIL import ImageFont
+        font = ImageFont.load_default()
+        _pil_fonts[size] = font
+        return font
+
+
+# ==========================================
+# PIL 中文叠加
+# ==========================================
+
+def _put_text_pil(frame, text: str, xy: tuple[int, int], *,
+                  font_size: int = 20, color: tuple[int, int, int] = (0, 255, 0),
+                  anchor: str = "lt"):
+    """
+    用 PIL 在 OpenCV BGR 帧上绘制文字（支持中文）。
+    anchor: "lt"=左上, "rb"=右下, "rt"=右上, "lb"=左下
+    """
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        # PIL 不可用 → 降级为 OpenCV putText（只能 ASCII）
+        cv2.putText(frame, text, xy, cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6, color, 2, cv2.LINE_AA)
+        return
+
+    font = _get_font(font_size)
+
+    # OpenCV BGR → PIL RGB
+    pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(pil_img)
+
+    # 获取文字尺寸用于定位
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+    x, y = xy
+    if anchor == "rb":
+        x, y = x - tw, y - th
+    elif anchor == "rt":
+        x, y = x - tw, y
+    elif anchor == "lb":
+        x, y = x, y - th
+
+    draw.text((x, y), text, font=font, fill=color[::-1])  # BGR → RGB
+
+    # 写回 OpenCV BGR
+    rgb = np.array(pil_img)
+    frame[:] = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+
+# ==========================================
+# VideoWriter
+# ==========================================
 
 def _build_video_writer(fps: float):
     """
-    创建 cv2.VideoWriter 实例。
-
-    参数:
-        fps: 实际测量的帧率（非硬编码的配置值）
-
-    返回 (writer, filepath)。
+    创建 cv2.VideoWriter，文件名带时间戳避免覆盖。
     """
     out_dir = get_output_dir()
-    filepath = f"{out_dir}/record.mp4"
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    filepath = f"{out_dir}/record_{timestamp}.mp4"
 
-    # fourcc: 四个字符的编码标识。
-    # pyright 的 cv2 stub 未包含此 C 扩展函数，忽略类型检查
     fourcc = cv2.VideoWriter_fourcc(*RECORDER_CODEC)  # pyright: ignore[reportAttributeAccessIssue]
 
     writer = cv2.VideoWriter(
@@ -49,68 +151,69 @@ def _build_video_writer(fps: float):
     return writer, filepath
 
 
+# ==========================================
+# 画面叠加
+# ==========================================
+
 def _draw_overlay(frame, state: dict, frame_count: int, real_fps: float):
     """
-    在帧画面上叠加信息。
+    在帧画面上叠加信息（PIL 渲染，全中文支持）。
 
-    左上角：时间戳 + 帧序号 + 实时 FPS（始终显示，不依赖 state_q）
-    右上角：录制指示灯
-    右下角：state_q 传来的状态信息（有则显示）
+    左上角: 时间戳 + 帧序号 + 实时 FPS
+    右上角: 录制指示灯
+    左下角: 最近告警文案（高亮）
+    右下角: 检测状态
     """
-    import datetime
-
     h, w = frame.shape[:2]
 
-    # ---- 左上角：时间戳 + 帧序号 + 实际帧率 ----
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    cv2.putText(
-        frame,
-        f"{timestamp}  |  frame #{frame_count}  |  {real_fps:.1f} fps",
-        (10, 30),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.6,
-        (0, 255, 0),  # 绿色
-        2,
-        cv2.LINE_AA,
-    )
+    # ---- 左上角：时间戳 + 帧序号 + FPS ----
+    now = datetime.datetime.now()
+    ts = now.strftime("%Y-%m-%d %H:%M:%S")
+    _put_text_pil(frame, f"{ts}  |  frame #{frame_count}  |  {real_fps:.1f} fps",
+                  (10, 5), font_size=18, color=(0, 255, 0))
 
     # ---- 右上角：录制指示灯 ----
-    cv2.putText(
-        frame,
-        "● REC",
-        (w - 100, 30),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
-        (0, 0, 255),  # 红色
-        2,
-        cv2.LINE_AA,
-    )
+    _put_text_pil(frame, "● REC", (w - 10, 5),
+                  font_size=22, color=(0, 0, 255), anchor="rt")
 
-    # ---- 右下角：state_q 传来的额外状态 ----
-    y_offset = h - 20
-    for key, value in reversed(list(state.items())):
-        text = f"{key}: {value}"
-        cv2.putText(
-            frame,
-            text,
-            (w - 250, y_offset),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (0, 255, 0),
-            2,
-            cv2.LINE_AA,
-        )
-        y_offset -= 25
+    # ---- 右下角：检测状态 ----
+    y_bottom = h - 5
+    # 先画检测状态（从下往上排列）
+    status_keys = [k for k in state.keys() if k not in ("最近提醒",)]
+    # 按固定顺序排列：帧、盲道、楼梯、水坑、井盖、草地
+    priority_order = ["帧", "盲道", "上楼梯", "下楼梯", "水坑", "井盖", "草地"]
+    ordered = [k for k in priority_order if k in state] + \
+              [k for k in status_keys if k not in priority_order]
+
+    for key in reversed(ordered):
+        value = state[key]
+        text = f"{key}: {value}" if value else key
+        _put_text_pil(frame, text, (w - 10, y_bottom),
+                      font_size=18, color=(0, 255, 0), anchor="rb")
+        y_bottom -= 22
+
+    # ---- 左下角：最近提醒（黄色醒目） ----
+    alerts = state.get("最近提醒", [])
+    if alerts:
+        y_alert = h - 5
+        for alert_text in reversed(alerts[-3:]):  # 最多显示最近 3 条
+            _put_text_pil(frame, f"⚠ {alert_text}", (10, y_alert),
+                          font_size=20, color=(0, 255, 255), anchor="lb")
+            y_alert -= 26
 
     return frame
 
+
+# ==========================================
+# 主循环
+# ==========================================
 
 def recorder_worker(recorder_q, stop_event, state_q):
     """
     录制主循环。
 
     工作流程:
-        1. 等待第一帧到达（不创建文件）
+        1. 等待第一帧到达
         2. 等待第二帧到达 → 根据时间间隔计算真实 FPS
         3. 以真实 FPS 创建 VideoWriter，写入缓冲的 2 帧
         4. 循环取帧 → 叠加信息 → 写入视频
@@ -118,14 +221,19 @@ def recorder_worker(recorder_q, stop_event, state_q):
     """
     print("[Recorder] 正在等待首帧以测量真实帧率...")
 
+    # 检测中文字体
+    font_path = _find_cjk_font()
+    if font_path:
+        print(f"[Recorder] 中文字体: {font_path}")
+    else:
+        print("[Recorder] ⚠ 未找到中文字体，中文将降级显示。请安装: apt install fonts-wqy-zenhei")
+
     current_state: dict = {}
     frame_count = 0
 
     # ---- 阶段 1：缓冲开头两帧，测量真实 FPS ----
-    # VideoWriter 需要固定 FPS，但实际推理速度未知（可能是 5fps 也可能是 30fps）。
-    # 用头两帧的到达间隔计算真实帧率，保证视频播放速度与真实时间一致。
     buffered_frames = []
-    t_first = 0.0   # 初始化让类型检查器满意
+    t_first = 0.0
     t_second = 0.0
 
     def _fetch_frame():
@@ -167,18 +275,16 @@ def recorder_worker(recorder_q, stop_event, state_q):
     # 计算真实 FPS
     delta = t_second - t_first
     if delta <= 0:
-        delta = 0.2  # 保护：最小间隔 200ms = 5 FPS
+        delta = 0.2
     real_fps = 1.0 / delta
-
-    # 限制在合理范围
     real_fps = max(1.0, min(real_fps, 60.0))
     print(f"[Recorder] 实测帧率: {real_fps:.1f} fps (帧间隔: {delta*1000:.0f}ms)")
 
-    # ---- 阶段 2：以真实 FPS 创建 VideoWriter ----
+    # ---- 阶段 2：创建 VideoWriter（文件名带时间戳） ----
     writer, filepath = _build_video_writer(real_fps)
     print(f"[Recorder] 视频文件已创建: {filepath}")
 
-    # 写入缓冲的两帧（更新叠加以显示真实 FPS）
+    # 写入缓冲的两帧
     for f in buffered_frames:
         writer.write(f)
 

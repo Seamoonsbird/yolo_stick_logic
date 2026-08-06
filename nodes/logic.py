@@ -14,6 +14,7 @@
 
 import time
 import queue
+import datetime
 from typing import Optional
 from config import (
     CAMERA_WIDTH,
@@ -332,18 +333,33 @@ def _speak_text(text: str):
     t.start()
 
 
+# 最近告警记录（模块级，供 speak 写入、主循环读取塞进 state_q）
+_recent_alerts: list[str] = []
+
+
+def get_recent_alerts() -> list[str]:
+    """获取最近告警列表（供主循环写入 status 字典）。"""
+    return _recent_alerts.copy()
+
+
 # Speak 的对外接口（受告警冷却管理，底层走 TTS 引擎）
 def speak(text: str, category: str = "general", alert_mgr: Optional[AlertManager] = None):
     """
     语音播报（受冷却管理控制）。
     - 冷却期内自动跳过
     - 后台线程异步 TTS，不阻塞推理
-    - 引擎: espeak-ng → pyttsx3 → 打印兜底
+    - 告警文案自动记录到 _recent_alerts（供视频叠加显示）
     """
     if alert_mgr is not None and not alert_mgr.can_alert(category):
         return
 
     print(f"[盲杖] 🗣 {text}")
+
+    # 记录告警到模块级列表（视频叠加用）
+    now = datetime.datetime.now().strftime("%H:%M:%S")
+    _recent_alerts.append(f"[{now}] {text}")
+    if len(_recent_alerts) > 10:
+        _recent_alerts.pop(0)
 
     _speak_text(text)
 
@@ -548,7 +564,10 @@ def logic_worker(result_q, recorder_q, stop_event, state_q=None):
                 loss_count += 1
 
             # ---- 重置状态 ----
-            status = {"帧": str(frame_count)}
+            status = {
+                "帧": str(frame_count),
+                "最近提醒": get_recent_alerts(),
+            }
 
             # ======================================
             # 各模块检测 & 提醒
