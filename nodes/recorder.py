@@ -183,7 +183,7 @@ def _draw_overlay(frame, state: dict, frame_count: int, real_fps: float):
     # 先画检测状态（从下往上排列）
     status_keys = [k for k in state.keys() if k not in ("最近提醒",)]
     # 按固定顺序排列：帧、盲道、楼梯、水坑、井盖、草地
-    priority_order = ["帧", "盲道", "上楼梯", "下楼梯", "水坑", "井盖", "草地"]
+    priority_order = ["帧", "盲道", "上楼梯", "下楼梯", "水坑", "井盖", "草地", "斑马线", "木板"]
     ordered = [k for k in priority_order if k in state] + \
               [k for k in status_keys if k not in priority_order]
 

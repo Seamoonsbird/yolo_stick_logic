@@ -73,12 +73,14 @@ ALERT_COOLDOWN = {
     "water":        2.0,    # 水坑（高频危险）
     "well_lid":     2.0,    # 井盖（高频危险）
     "grass":        5.0,    # 草地（场景变化）
+    "crosswalk":    5.0,    # 斑马线（场景变化）
+    "wood":         5.0,    # 木板（特殊地形）
     "general":      1.5,    # 通用最短间隔
 }
 
 # ==========================================
 # 类别名映射（需与模型训练时的类别名一致）
-# 模型类别: {0: 'blind_path', 1: 'well_lid', 2: 'grass', 3: 'downstairs', 4: 'upstairs', 5: 'water'}
+# 模型类别: {0:'blind_path',1:'well_lid',2:'crosswalk',3:'grass',4:'upstairs',5:'downstairs',6:'wood',7:'water'}
 # ==========================================
 
 # 盲道
@@ -92,8 +94,10 @@ CLASS_DOWNSTAIRS = "downstairs"
 CLASS_WATER = "water"
 CLASS_WELL_LID = "well_lid"
 
-# 地形（仅正前方提醒）
+# 地形（仅正前方提醒，侧方忽略）
 CLASS_GRASS = "grass"
+CLASS_CROSSWALK = "crosswalk"
+CLASS_WOOD = "wood"
 
 # ---- 按类别分组，方便批量处理 ----
 HAZARD_CLASSES = {
@@ -104,7 +108,9 @@ HAZARD_CLASSES = {
 }
 
 TERRAIN_CLASSES = {
-    CLASS_GRASS: "草地",
+    CLASS_GRASS:     "草地",
+    CLASS_CROSSWALK: "斑马线",
+    CLASS_WOOD:      "木板",
 }
 
 
@@ -176,7 +182,7 @@ def classify_detections(det_results):
     """
     groups = {k: [] for k in (
         CLASS_BLIND_PATH, CLASS_UPSTAIRS, CLASS_DOWNSTAIRS,
-        CLASS_WATER, CLASS_WELL_LID, CLASS_GRASS,
+        CLASS_WATER, CLASS_WELL_LID, CLASS_GRASS, CLASS_CROSSWALK, CLASS_WOOD,
     )}
 
     for det in det_results:
@@ -472,13 +478,17 @@ def handle_obstacles(groups, alert_mgr, status: dict):
 
 def handle_terrain(groups, alert_mgr, status: dict):
     """
-    草地检测：仅正前方提醒，侧前方忽略。
+    地形检测（草地/斑马线/木板）：仅正前方提醒，侧前方忽略。
     - 正前方 + 近距离 → 提醒地面变化
-    - 侧前方 → 不提醒（用户不会走到侧面草地）
+    - 侧前方 → 不提醒（用户不会走到侧面）
     """
-    for cls_name, label in [
-        (CLASS_GRASS, "草地"),
-    ]:
+    terrain_items = [
+        (CLASS_GRASS,     "草地"),
+        (CLASS_CROSSWALK, "斑马线"),
+        (CLASS_WOOD,      "木板"),
+    ]
+
+    for cls_name, label in terrain_items:
         detections = groups.get(cls_name, [])
         if not detections:
             continue
@@ -498,7 +508,12 @@ def handle_terrain(groups, alert_mgr, status: dict):
 
         if is_danger_close(nearest["box"]):
             status[label] = "⚠️正前方近距离"
-            speak(f"前方草地，请注意脚下", cls_name, alert_mgr)
+            if cls_name == CLASS_CROSSWALK:
+                speak(f"前方斑马线，请注意来往车辆", cls_name, alert_mgr)
+            elif cls_name == CLASS_WOOD:
+                speak(f"前方木板路，请注意脚下", cls_name, alert_mgr)
+            else:
+                speak(f"前方草地，请注意脚下", cls_name, alert_mgr)
         elif is_nearby(nearest["box"]):
             status[label] = "🔶正前方"
             speak(f"前方{label}，请注意", cls_name, alert_mgr)
