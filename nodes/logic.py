@@ -12,10 +12,12 @@
   - state_q → 录制画面叠加状态信息
 """
 
+from __future__ import annotations
+
 import time
 import queue
 import datetime
-from typing import Optional
+from typing import Optional, List
 from config import (
     CAMERA_WIDTH,
     CAMERA_HEIGHT,

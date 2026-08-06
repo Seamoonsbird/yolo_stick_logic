@@ -11,6 +11,8 @@
   - VideoWriter FPS 根据头两帧到达间隔动态计算
 """
 
+from __future__ import annotations
+
 import queue
 import time
 import datetime
