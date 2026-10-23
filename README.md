@@ -55,6 +55,7 @@ yolo_stick_logic/
 | `test.py` | 视频抽帧工具：读取 `output/orange.mkv`，每 15 帧存一张 png，用来制作数据集。 |
 | `logic_test.py` | 从另一个项目（抓球小车）拷来的状态机逻辑，依赖的 `GRAB_ZONE_*` 等配置本仓库 `config.py` 里没有，仅作思路参考，不能直接运行。 |
 | `led.py` | 树莓派 LED 闪烁测试（`RPi.GPIO`，BOARD 12 脚）。 |
+| `serial_test.py` | USB 转 TTL 串口测试工具：列串口、TX-RX 回环自测、按 `AA 02 cmd 55` 帧格式发命令并看回包。需要 `pip install pyserial`。 |
 
 ## sh/ — Docker 启动脚本
 
