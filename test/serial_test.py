@@ -36,12 +36,11 @@ USB 转 TTL 串口测试工具（在 Docker 容器内运行）。
           3.3V/5V 和 GND 也接错位置。
 """
 
-from __future__ import annotations
-
 import argparse
 import glob
 import sys
 import time
+from typing import Optional, Tuple
 
 # 与 logic_test.py 保持一致的单片机帧格式
 FRAME_HEAD = 0xAA
@@ -121,7 +120,7 @@ def list_ports() -> list:
     return ports
 
 
-def pick_port(explicit: str | None) -> str:
+def pick_port(explicit: Optional[str]) -> str:
     """选端口：用户指定 > by-id > 第一个 ttyUSB/ttyACM。"""
     if explicit:
         return explicit
@@ -202,7 +201,7 @@ def read_for(ser, seconds: float) -> bytes:
     return bytes(buf)
 
 
-def loopback_test(ser, payload: bytes, repeat: int, interval: float) -> tuple[int, int]:
+def loopback_test(ser, payload: bytes, repeat: int, interval: float) -> Tuple[int, int]:
     """短接 TX-RX 后，发什么就该收到什么。返回 (成功次数, 失败次数)。"""
     ok = fail = 0
     for i in range(repeat):
