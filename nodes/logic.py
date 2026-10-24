@@ -5,7 +5,7 @@
   1. 盲道检测   — 提醒走盲道正中间（偏移超阈值时语音纠正）
   2. 楼梯检测   — 上/下楼梯提醒（近距离告警）
   3. 水坑/井盖  — 前方障碍物提醒（高优先级）
-  4. 草地/斑马线 — 仅正前方提醒（侧前方忽略，避免误报）
+  4. 木板/草地/斑马线 — 仅正前方提醒（侧前方忽略，避免误报）
 
 输出:
   - 控制台语音文案（可接入 TTS）
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import time
 import queue
+import os
 import datetime
 from typing import Optional, List
 from config import (
@@ -24,6 +25,7 @@ from config import (
     ESPEAK_VOICE,
     ESPEAK_SPEED,
     ESPEAK_VOLUME,
+    SOUNDS_DIR,
     FALLBACK_WAV,
 )
 
@@ -248,8 +250,55 @@ class AlertManager:
 
 # play_alert / play_alert_async / speak_audio 统一在 nodes.audio 中实现：
 #   espeak-ng 合成中文 WAV → paplay(PulseAudio)/aplay(ALSA) 播放。
-# 语音参数（ESPEAK_VOICE / ESPEAK_SPEED / ESPEAK_VOLUME / FALLBACK_WAV）见 config.py。
-from nodes.audio import speak_audio
+# 语音参数（ESPEAK_VOICE / ESPEAK_SPEED / ESPEAK_VOLUME / SOUNDS_DIR / FALLBACK_WAV）见 config.py。
+from nodes.audio import speak_audio, play_alert_async
+
+
+# ==========================================================
+# 预录人声清单（关键！你提供的音频文件就按此命名）
+# ----------------------------------------------------------
+# 每个播报场景对应一个 WAV 文件名 + 一句兜底文案（文件缺失时由 espeak 合成）。
+# 请把录音文件放到: yolo_stick_logic/assets/sounds/ 下，文件名必须与左侧一致。
+# WAV 格式要求: 16-bit PCM，单/双声道均可，采样率 16000/22050/44100 均可（paplay 自适应）。
+# 命名统一用小写英文+下划线，避免中文/空格导致路径问题。
+# ==========================================================
+SOUND_PRESETS = {
+    # ---- 盲道 ----
+    "blind_path_left":  ("blind_path_left.wav",  "盲道偏左，请向左调整"),
+    "blind_path_right": ("blind_path_right.wav", "盲道偏右，请向右调整"),
+    "blind_path_lost":  ("blind_path_lost.wav",  "未检测到盲道，请用盲杖探寻"),
+    # ---- 楼梯（上/下 × 危险距离/近距离）----
+    "upstairs_near":    ("upstairs_near.wav",    "前方上楼梯，请小心慢行"),
+    "upstairs_warn":    ("upstairs_warn.wav",    "前方上楼梯，请注意"),
+    "downstairs_near":  ("downstairs_near.wav",  "前方下楼梯，请小心慢行"),
+    "downstairs_warn":  ("downstairs_warn.wav",  "前方下楼梯，请注意"),
+    # ---- 障碍物（水坑/井盖 × 近/远）----
+    "water_near":       ("water_near.wav",       "前方有水坑，请绕行"),
+    "water_far":        ("water_far.wav",        "前方远处有水坑，请注意"),
+    "well_lid_near":    ("well_lid_near.wav",     "前方有井盖，请绕行"),
+    "well_lid_far":     ("well_lid_far.wav",      "前方远处有井盖，请注意"),
+    # ---- 地形（草地/斑马线/木板，危险距离用专属提醒，近距离通用提醒）----
+    "crosswalk_near":   ("crosswalk_near.wav",   "前方斑马线，请注意来往车辆"),
+    "crosswalk_warn":   ("crosswalk_warn.wav",   "前方斑马线，请注意"),
+    "wood_near":        ("wood_near.wav",        "前方木板路，请注意脚下"),
+    "wood_warn":        ("wood_warn.wav",        "前方木板，请注意"),
+    "grass_near":       ("grass_near.wav",       "前方草地，请注意脚下"),
+    "grass_warn":       ("grass_warn.wav",       "前方草地，请注意"),
+}
+
+
+def _preset_path(key: str) -> str:
+    """返回某个预录场景对应的 WAV 绝对路径（文件可能不存在）。"""
+    fname, _ = SOUND_PRESETS.get(key, (f"{key}.wav", ""))
+    return os.path.join(SOUNDS_DIR, fname)
+
+
+def preset_status() -> tuple[int, int, list[str]]:
+    """统计预录音频就绪情况：返回 (已就绪数, 总数, 缺失的 key 列表)。"""
+    total = len(SOUND_PRESETS)
+    missing = [k for k, (fname, _) in SOUND_PRESETS.items()
+               if not os.path.isfile(os.path.join(SOUNDS_DIR, fname))]
+    return (total - len(missing), total, missing)
 
 
 
@@ -263,13 +312,17 @@ def get_recent_alerts() -> list[str]:
     return _recent_alerts.copy()
 
 
-# Speak 的对外接口（受告警冷却管理，底层走 TTS 引擎）
-def speak(text: str, category: str = "general", alert_mgr: Optional[AlertManager] = None):
+# Speak 的对外接口（受告警冷却管理，底层优先预录音频、缺失则 espeak 兜底）
+def speak(text: str, category: str = "general", alert_mgr: Optional[AlertManager] = None,
+          sound_key: Optional[str] = None):
     """
     语音播报（受冷却管理控制）。
-    - 冷却期内自动跳过
-    - 用 espeak-ng 将中文文案合成 WAV，再经 paplay/aplay 播放（非阻塞后台线程）
-    - 告警文案自动记录到 _recent_alerts（供视频叠加显示）
+
+    发声优先级:
+      1. 若传入 sound_key 且对应预录 WAV 存在 → 直接播放该人声（最清晰、最可靠）。
+      2. 否则用 espeak-ng 把 text 合成 WAV 播放（预录缺失时的兜底）。
+      3. espeak 也不可用 → 播放占位蜂鸣，保证至少有声反馈。
+    冷却期内自动跳过；告警文案自动记录到 _recent_alerts（供视频叠加显示）。
     """
     if alert_mgr is not None and not alert_mgr.can_alert(category):
         return
@@ -282,14 +335,28 @@ def speak(text: str, category: str = "general", alert_mgr: Optional[AlertManager
     if len(_recent_alerts) > 10:
         _recent_alerts.pop(0)
 
-    # 实际发声：espeak-ng 合成 → paplay 播放（失败自动回退占位提示音）
-    speak_audio(
-        text,
-        voice=ESPEAK_VOICE,
-        speed=ESPEAK_SPEED,
-        volume=ESPEAK_VOLUME,
-        fallback_wav=FALLBACK_WAV,
-    )
+    # 优先播放预录人声
+    if sound_key:
+        wav = _preset_path(sound_key)
+        if os.path.isfile(wav):
+            play_alert_async(wav)
+        else:
+            # 预录缺失 → espeak 合成兜底，绝不静默
+            speak_audio(
+                text,
+                voice=ESPEAK_VOICE,
+                speed=ESPEAK_SPEED,
+                volume=ESPEAK_VOLUME,
+                fallback_wav=FALLBACK_WAV,
+            )
+    else:
+        speak_audio(
+            text,
+            voice=ESPEAK_VOICE,
+            speed=ESPEAK_SPEED,
+            volume=ESPEAK_VOLUME,
+            fallback_wav=FALLBACK_WAV,
+        )
 
     if alert_mgr is not None:
         alert_mgr.mark_alert(category)
@@ -332,7 +399,9 @@ def handle_blind_path(groups, alert_mgr, status: dict):
     direction = "右" if offset < 0 else "左"
     status["盲道"] = f"偏{direction} (偏移{offset:+.0f}px)"
 
-    speak(f"盲道偏{direction}，请向{direction}调整", "blind_path", alert_mgr)
+    dir_en = "left" if direction == "左" else "right"
+    speak(f"盲道偏{direction}，请向{direction}调整", "blind_path", alert_mgr,
+          sound_key=f"blind_path_{dir_en}")
 
 
 def handle_stairs(groups, alert_mgr, status: dict):
@@ -358,12 +427,14 @@ def handle_stairs(groups, alert_mgr, status: dict):
         if nearest is None:
             continue
 
-        if is_danger_close(nearest["box"]):
-            status[label] = "⚠️危险距离"
-            speak(f"前方{label}，请小心慢行", cls_name, alert_mgr)
-        elif is_nearby(nearest["box"]):
-            status[label] = "🔶近距离"
-            speak(f"前方{label}，请注意", cls_name, alert_mgr)
+            if is_danger_close(nearest["box"]):
+                status[label] = "⚠️危险距离"
+                speak(f"前方{label}，请小心慢行", cls_name, alert_mgr,
+                      sound_key=f"{cls_name}_near")
+            elif is_nearby(nearest["box"]):
+                status[label] = "🔶近距离"
+                speak(f"前方{label}，请注意", cls_name, alert_mgr,
+                      sound_key=f"{cls_name}_warn")
         else:
             status[label] = "远距离"
 
@@ -387,10 +458,12 @@ def handle_obstacles(groups, alert_mgr, status: dict):
 
         if nearby_ahead:
             status[label] = "⚠️前方危险"
-            speak(f"前方有{label}，请绕行", cls_name, alert_mgr)
+            speak(f"前方有{label}，请绕行", cls_name, alert_mgr,
+                  sound_key=f"{cls_name}_near")
         elif ahead:
             status[label] = "前方远处"
-            speak(f"前方远处有{label}，请注意", cls_name, alert_mgr)
+            speak(f"前方远处有{label}，请注意", cls_name, alert_mgr,
+                  sound_key=f"{cls_name}_far")
         else:
             # 侧方有障碍，记录但不语音提醒
             status[label] = "侧方"
@@ -429,14 +502,18 @@ def handle_terrain(groups, alert_mgr, status: dict):
         if is_danger_close(nearest["box"]):
             status[label] = "⚠️正前方近距离"
             if cls_name == CLASS_CROSSWALK:
-                speak(f"前方斑马线，请注意来往车辆", cls_name, alert_mgr)
+                speak(f"前方斑马线，请注意来往车辆", cls_name, alert_mgr,
+                      sound_key="crosswalk_near")
             elif cls_name == CLASS_WOOD:
-                speak(f"前方木板路，请注意脚下", cls_name, alert_mgr)
+                speak(f"前方木板路，请注意脚下", cls_name, alert_mgr,
+                      sound_key="wood_near")
             else:
-                speak(f"前方草地，请注意脚下", cls_name, alert_mgr)
+                speak(f"前方草地，请注意脚下", cls_name, alert_mgr,
+                      sound_key="grass_near")
         elif is_nearby(nearest["box"]):
             status[label] = "🔶正前方"
-            speak(f"前方{label}，请注意", cls_name, alert_mgr)
+            speak(f"前方{label}，请注意", cls_name, alert_mgr,
+                  sound_key=f"{cls_name}_warn")
         else:
             # 远处不提醒，避免频繁干扰
             status[label] = "前方远处"
@@ -466,6 +543,16 @@ def logic_worker(result_q, recorder_q, stop_event, state_q=None):
     print()
 
     alert_mgr = AlertManager()
+
+    # ---- 预录音频就绪情况自检 ----
+    ready, total, missing = preset_status()
+    if ready == total:
+        print(f"[盲杖] 预录音频: 全部就绪 ({ready}/{total}) ✅")
+    else:
+        print(f"[盲杖] 预录音频: 已就绪 {ready}/{total}，缺失 {len(missing)} 个（将回退 espeak）")
+        for k in missing:
+            print(f"[盲杖]   - 缺: {SOUND_PRESETS[k][0]}  ({SOUND_PRESETS[k][1]})")
+
     frame_count = 0
     loss_count = 0          # 盲道连续丢失帧计数
     status: dict[str, str] = {}
@@ -515,7 +602,8 @@ def logic_worker(result_q, recorder_q, stop_event, state_q=None):
 
             # 盲道长时间丢失提醒
             if loss_count >= BLIND_PATH_LOSS_FRAMES and loss_count == BLIND_PATH_LOSS_FRAMES:
-                speak("未检测到盲道，请用盲杖探寻", "blind_path", alert_mgr)
+                speak("未检测到盲道，请用盲杖探寻", "blind_path", alert_mgr,
+                      sound_key="blind_path_lost")
 
             # 2. 楼梯检测（上下楼梯）
             handle_stairs(groups, alert_mgr, status)

@@ -120,16 +120,21 @@ SHOW_FPS_ON_FRAME = False
 # ============================================================
 # 音频 / 语音播报
 # ============================================================
-# 语音合成: espeak-ng 把中文文案合成 WAV，再经 paplay(PulseAudio)/aplay(ALSA) 播放。
+# 播报策略（优先级从高到低）:
+#   1. 预录人声 WAV —— 放在 SOUNDS_DIR 下，文件名见 nodes/logic.py 的 SOUND_PRESETS。
+#      音质最清晰、最可靠，盲杖这类无障碍设备首选。
+#   2. espeak-ng 实时合成 —— 当某个预录文件缺失时自动兜底，保证不静默。
+#   3. 占位蜂鸣 —— 连 espeak 都不可用时的最后有声反馈。
 # 不依赖任何需编译的 Python 音频库（sounddevice/pyaudio/simpleaudio 等）。
+# 播放统一走 paplay(PulseAudio)/aplay(ALSA) → 系统默认输出（宿主机 USB 声卡）。
 
-# espeak-ng 中文语音参数
+# espeak-ng 中文语音参数（仅作为预录缺失时的兜底合成，适当放慢更清晰）
 ESPEAK_VOICE = "zh"      # 普通话
-ESPEAK_SPEED = 160       # 语速（词/分钟），默认 175，稍慢更清晰
-ESPEAK_VOLUME = 100      # 音量 0-200
+ESPEAK_SPEED = 130       # 语速（词/分钟），兜底合成用，稍慢更清晰
+ESPEAK_VOLUME = 150      # 音量 0-200
 
-# 音频资源目录（占位提示音；将来可放预录中文 WAV 覆盖）
-SOUNDS_DIR = "./assets/sounds"
+# 音频资源目录（预录中文 WAV + 占位蜂鸣）。用绝对路径，避免容器 cwd 不同导致找不到。
+SOUNDS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "sounds")
 
 # espeak-ng 不可用时的兜底提示音（短蜂鸣），保证至少有声反馈
 FALLBACK_WAV = os.path.join(SOUNDS_DIR, "fallback_alert.wav")
