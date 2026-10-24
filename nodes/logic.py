@@ -21,6 +21,10 @@ from typing import Optional, List
 from config import (
     CAMERA_WIDTH,
     CAMERA_HEIGHT,
+    ESPEAK_VOICE,
+    ESPEAK_SPEED,
+    ESPEAK_VOLUME,
+    FALLBACK_WAV,
 )
 
 # ==========================================
@@ -239,106 +243,15 @@ class AlertManager:
 
 
 # ==========================================
-# TTS 语音输出
+# 语音播报后端（见 nodes/audio.py）
 # ==========================================
 
-import subprocess
-import threading
-
-# TTS 引擎选择: "espeak" | "pyttsx3" | "print"
-# espeak 最可靠（命令行直接调 ALSA），适合 Docker + Jetson
-TTS_ENGINE = "print"
-
-# espeak-ng 中文语音参数
-ESPEAK_VOICE = "zh"          # 普通话
-ESPEAK_SPEED = 160           # 语速 (词/分钟)，默认 175，稍慢更清晰
-ESPEAK_VOLUME = 100          # 音量 0-200
-
-# pyttsx3 引擎实例（延迟初始化，避免没装库时崩溃）
-_pyttsx_engine = None
-_pyttsx_lock = threading.Lock()
-
-# espeak 子进程锁（避免并发调用互相覆盖）
-_espeak_lock = threading.Lock()
+# play_alert / play_alert_async / speak_audio 统一在 nodes.audio 中实现：
+#   espeak-ng 合成中文 WAV → paplay(PulseAudio)/aplay(ALSA) 播放。
+# 语音参数（ESPEAK_VOICE / ESPEAK_SPEED / ESPEAK_VOLUME / FALLBACK_WAV）见 config.py。
+from nodes.audio import speak_audio
 
 
-def _tts_espeak(text: str) -> bool:
-    """
-    使用 espeak-ng 命令行 TTS。
-    返回 True 表示播放成功。
-    """
-    try:
-        cmd = [
-            "espeak-ng",
-            "-v", ESPEAK_VOICE,
-            "-s", str(ESPEAK_SPEED),
-            "-a", str(ESPEAK_VOLUME),
-            "--",
-            text,
-        ]
-        # 不等待 TTS 播放完毕，后台异步播放避免阻塞推理循环
-        with _espeak_lock:
-            subprocess.run(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=10,
-            )
-        return True
-    except FileNotFoundError:
-        return False
-    except Exception:
-        return False
-
-
-def _tts_pyttsx3(text: str) -> bool:
-    """
-    使用 pyttsx3 库进行 TTS。
-    返回 True 表示播放成功。
-    """
-    global _pyttsx_engine
-    try:
-        with _pyttsx_lock:
-            if _pyttsx_engine is None:
-                import pyttsx3
-                _pyttsx_engine = pyttsx3.init()
-                # 尝试设置中文语音
-                voices = _pyttsx_engine.getProperty("voices")
-                for v in voices:
-                    if "zh" in v.id.lower() or "chinese" in v.name.lower() or "mandarin" in v.name.lower():
-                        _pyttsx_engine.setProperty("voice", v.id)
-                        break
-                _pyttsx_engine.setProperty("rate", 160)
-                _pyttsx_engine.setProperty("volume", 1.0)
-            _pyttsx_engine.say(text)
-            _pyttsx_engine.runAndWait()
-        return True
-    except ImportError:
-        return False
-    except Exception:
-        return False
-
-
-def _speak_text(text: str):
-    """
-    根据 TTS_ENGINE 配置选择 TTS 方式，异步执行避免阻塞主循环。
-    """
-    def _run():
-        if TTS_ENGINE == "espeak":
-            if _tts_espeak(text):
-                return
-        elif TTS_ENGINE == "pyttsx3":
-            if _tts_pyttsx3(text):
-                return
-        # 所有 TTS 都失败 → fallback 到 espeak（可能是 pyttsx3 失败）
-        if TTS_ENGINE != "espeak" and _tts_espeak(text):
-            return
-        # 最终兜底：无法发声，仅打印到控制台
-        print(f"[盲杖] 🔇 语音引擎不可用，尝试过 espeak-ng / pyttsx3 均失败。请安装: apt install espeak-ng")
-
-    # 在后台线程中运行 TTS，不阻塞检测循环
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
 
 
 # 最近告警记录（模块级，供 speak 写入、主循环读取塞进 state_q）
@@ -355,7 +268,7 @@ def speak(text: str, category: str = "general", alert_mgr: Optional[AlertManager
     """
     语音播报（受冷却管理控制）。
     - 冷却期内自动跳过
-    - 后台线程异步 TTS，不阻塞推理
+    - 用 espeak-ng 将中文文案合成 WAV，再经 paplay/aplay 播放（非阻塞后台线程）
     - 告警文案自动记录到 _recent_alerts（供视频叠加显示）
     """
     if alert_mgr is not None and not alert_mgr.can_alert(category):
@@ -369,7 +282,14 @@ def speak(text: str, category: str = "general", alert_mgr: Optional[AlertManager
     if len(_recent_alerts) > 10:
         _recent_alerts.pop(0)
 
-    _speak_text(text)
+    # 实际发声：espeak-ng 合成 → paplay 播放（失败自动回退占位提示音）
+    speak_audio(
+        text,
+        voice=ESPEAK_VOICE,
+        speed=ESPEAK_SPEED,
+        volume=ESPEAK_VOLUME,
+        fallback_wav=FALLBACK_WAV,
+    )
 
     if alert_mgr is not None:
         alert_mgr.mark_alert(category)

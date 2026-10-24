@@ -118,6 +118,23 @@ PRINT_FPS = True
 SHOW_FPS_ON_FRAME = False
 
 # ============================================================
+# 音频 / 语音播报
+# ============================================================
+# 语音合成: espeak-ng 把中文文案合成 WAV，再经 paplay(PulseAudio)/aplay(ALSA) 播放。
+# 不依赖任何需编译的 Python 音频库（sounddevice/pyaudio/simpleaudio 等）。
+
+# espeak-ng 中文语音参数
+ESPEAK_VOICE = "zh"      # 普通话
+ESPEAK_SPEED = 160       # 语速（词/分钟），默认 175，稍慢更清晰
+ESPEAK_VOLUME = 100      # 音量 0-200
+
+# 音频资源目录（占位提示音；将来可放预录中文 WAV 覆盖）
+SOUNDS_DIR = "./assets/sounds"
+
+# espeak-ng 不可用时的兜底提示音（短蜂鸣），保证至少有声反馈
+FALLBACK_WAV = os.path.join(SOUNDS_DIR, "fallback_alert.wav")
+
+# ============================================================
 # 工具函数
 # ============================================================
 
