@@ -6,10 +6,12 @@ from nodes.logic import logic_worker
 from nodes.recorder import recorder_worker
 from config import (
     ENABLE_RECORDER,
+    MUX_ALERT_AUDIO,
     FRAME_QUEUE_MAXSIZE,
     RESULT_QUEUE_MAXSIZE,
     RECORDER_QUEUE_MAXSIZE,
     STATE_QUEUE_MAXSIZE,
+    AUDIO_EVENT_QUEUE_MAXSIZE,
 )
 
 
@@ -19,6 +21,10 @@ def main():
     recorder_q = Queue(maxsize=RECORDER_QUEUE_MAXSIZE) if ENABLE_RECORDER else None
     state_q = Queue(maxsize=STATE_QUEUE_MAXSIZE)
 
+    # 播报事件队列：逻辑进程写入「实际播了哪条语音」，录制进程按时间轴混进视频
+    audio_q = (Queue(maxsize=AUDIO_EVENT_QUEUE_MAXSIZE)
+               if (MUX_ALERT_AUDIO and ENABLE_RECORDER) else None)
+
     # 系统停止事件
     stop_event = Event()
 
@@ -27,7 +33,7 @@ def main():
     # ===========================================
     process_cam = Process(target=camera_worker,args=(frame_q, stop_event),name="Camera")
     process_inf = Process(target=inference_worker,args=(frame_q,result_q,recorder_q,stop_event),name="Inference")
-    process_log = Process(target=logic_worker,args=(result_q,recorder_q,stop_event,state_q),name="Logic")
+    process_log = Process(target=logic_worker,args=(result_q,recorder_q,stop_event,state_q,audio_q),name="Logic")
 
     print("多进程已创建，即将启动多进程")
 
@@ -41,7 +47,7 @@ def main():
     process_log.start()
 
     if ENABLE_RECORDER:
-        process_rec = Process(target=recorder_worker,args=(recorder_q,stop_event,state_q),name="Record")
+        process_rec = Process(target=recorder_worker,args=(recorder_q,stop_event,state_q,audio_q),name="Record")
         process_rec.daemon = True
         process_rec.start()
         print("开启录制")

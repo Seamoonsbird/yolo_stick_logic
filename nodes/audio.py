@@ -11,7 +11,8 @@
   - play_alert(wav_path):           同步播放，内部用锁串行化，避免多进程/线程抢设备。
   - play_alert_async(wav_path):     非阻塞版本，后台线程播放。
   - espeak_ng_synthesize(text):     用 espeak-ng 把文本合成 WAV 文件，返回路径或 None。
-  - speak_audio(text, ...):         高层封装：espeak 合成 → 异步播放；失败回退占位提示音。
+  - prepare_audio(text, ...):       只准备 WAV、不播放，返回路径（录像混音用它拿文件）。
+  - speak_audio(text, ...):         高层封装：准备 WAV → 异步播放；失败回退占位提示音。
 """
 
 from __future__ import annotations
@@ -181,6 +182,27 @@ def espeak_ng_synthesize(text, out_path=None, voice="zh", speed=160, volume=100)
         return None
 
 
+def prepare_audio(text, voice="zh", speed=160, volume=100, fallback_wav=None):
+    """
+    只准备音频、不播放：返回实际要播放的 WAV 路径（供录像混音复用同一份文件）。
+
+    优先级:
+      1. espeak-ng 把文案合成 WAV
+      2. 合成失败 → 返回 fallback_wav（占位提示音）
+      3. 都不可用 → None
+    """
+    wav = espeak_ng_synthesize(text, voice=voice, speed=speed, volume=volume)
+    if wav:
+        return wav
+
+    if fallback_wav:
+        fb = _resolve(fallback_wav)
+        if os.path.isfile(fb):
+            return fb
+        print(f"[audio] ⚠️ 占位提示音也不存在: {fb}")
+    return None
+
+
 def speak_audio(text, voice="zh", speed=160, volume=100, fallback_wav=None) -> bool:
     """
     高层语音播报：先用 espeak-ng 把文案合成 WAV，再异步播放。
@@ -191,19 +213,13 @@ def speak_audio(text, voice="zh", speed=160, volume=100, fallback_wav=None) -> b
       True  → 已发起播放（合成成功或回退成功）
       False → 连占位音都无法播放（彻底静默，仅打印）
     """
-    wav = espeak_ng_synthesize(text, voice=voice, speed=speed, volume=volume)
-    if wav:
-        play_alert_async(wav)
-        return True
+    wav = prepare_audio(text, voice=voice, speed=speed,
+                        volume=volume, fallback_wav=fallback_wav)
+    if not wav:
+        return False
 
-    # espeak 不可用 → 占位提示音兜底，至少给使用者一个声音反馈
-    if fallback_wav:
-        fb = _resolve(fallback_wav)
-        if os.path.isfile(fb):
-            play_alert_async(fb)
-            return True
-        print(f"[audio] ⚠️ 占位提示音也不存在: {fb}")
-    return False
+    play_alert_async(wav)
+    return True
 
 
 def diag():

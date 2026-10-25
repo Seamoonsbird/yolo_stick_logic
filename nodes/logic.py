@@ -263,7 +263,35 @@ class AlertManager:
 # play_alert / play_alert_async / speak_audio 统一在 nodes.audio 中实现：
 #   espeak-ng 合成中文 WAV → paplay(PulseAudio)/aplay(ALSA) 播放。
 # 语音参数（ESPEAK_VOICE / ESPEAK_SPEED / ESPEAK_VOLUME / SOUNDS_DIR / FALLBACK_WAV）见 config.py。
-from nodes.audio import speak_audio, play_alert_async
+from nodes.audio import prepare_audio, play_alert_async
+
+
+# ==========================================
+# 播报事件 → 录制混音
+# ==========================================
+
+# 录像混音事件队列（由 logic_worker 通过 set_audio_event_queue 注入）。
+# 为 None 时不录，不影响播放。
+_audio_event_queue = None
+
+
+def set_audio_event_queue(q):
+    """注入告警音频事件队列，供录制节点把提示音按时间轴混进视频。"""
+    global _audio_event_queue
+    _audio_event_queue = q
+
+
+def _emit_audio_event(wav_path, text: str):
+    """记录一次「真实发生的播报」：时间戳 + WAV 路径 + 文案。"""
+    q = _audio_event_queue
+    if q is None or not wav_path:
+        return
+    try:
+        q.put_nowait({"t": time.time(), "wav": wav_path, "text": text})
+    except Exception:
+        # 队列满或已关闭：丢失一条录像音轨事件，不影响现场播报
+        pass
+
 
 
 # ==========================================================
@@ -335,6 +363,7 @@ def speak(text: str, category: str = "general", alert_mgr: Optional[AlertManager
       2. 否则用 espeak-ng 把 text 合成 WAV 播放（预录缺失时的兜底）。
       3. espeak 也不可用 → 播放占位蜂鸣，保证至少有声反馈。
     冷却期内自动跳过；告警文案自动记录到 _recent_alerts（供视频叠加显示）。
+    每次真实发声都会向 audio_q 发一条事件，录制节点据此把提示音混进视频。
     """
     if alert_mgr is not None and not alert_mgr.can_alert(category):
         return
@@ -347,28 +376,26 @@ def speak(text: str, category: str = "general", alert_mgr: Optional[AlertManager
     if len(_recent_alerts) > 10:
         _recent_alerts.pop(0)
 
-    # 优先播放预录人声
+    # 先确定「实际要播的 WAV」：预录人声优先，缺失才 espeak 合成 / 占位蜂鸣。
+    # 拿到路径后：一边异步播放，一边把事件发给录制节点（录像里才能有声音）。
+    wav_path = None
     if sound_key:
-        wav = _preset_path(sound_key)
-        if os.path.isfile(wav):
-            play_alert_async(wav)
-        else:
-            # 预录缺失 → espeak 合成兜底，绝不静默
-            speak_audio(
-                text,
-                voice=ESPEAK_VOICE,
-                speed=ESPEAK_SPEED,
-                volume=ESPEAK_VOLUME,
-                fallback_wav=FALLBACK_WAV,
-            )
-    else:
-        speak_audio(
+        preset = _preset_path(sound_key)
+        if os.path.isfile(preset):
+            wav_path = preset
+
+    if wav_path is None:
+        wav_path = prepare_audio(
             text,
             voice=ESPEAK_VOICE,
             speed=ESPEAK_SPEED,
             volume=ESPEAK_VOLUME,
             fallback_wav=FALLBACK_WAV,
         )
+
+    if wav_path:
+        play_alert_async(wav_path)
+        _emit_audio_event(wav_path, text)
 
     if alert_mgr is not None:
         alert_mgr.mark_alert(category)
@@ -559,7 +586,7 @@ def handle_terrain(groups, alert_mgr, status: dict):
 # 主循环
 # ==========================================
 
-def logic_worker(result_q, recorder_q, stop_event, state_q=None):
+def logic_worker(result_q, recorder_q, stop_event, state_q=None, audio_q=None):
     """
     盲杖逻辑主循环。
 
@@ -568,7 +595,11 @@ def logic_worker(result_q, recorder_q, stop_event, state_q=None):
       recorder_q   — 录制队列（本模块不使用，保留接口兼容）
       stop_event   — 多进程停止事件
       state_q      — 状态队列 → 录制节点叠加显示
+      audio_q      — 播报事件队列 → 录制节点把提示音混进视频（None 表示不混）
     """
+
+    # 把播报事件接到录制节点（在 speak() 里发事件）
+    set_audio_event_queue(audio_q)
 
     print("[盲杖] 盲杖辅助系统启动")
     print(f"[盲杖] 画面尺寸: {FRAME_WIDTH}x{FRAME_HEIGHT} (逆时针旋转后)" if ROTATE_CCW_90

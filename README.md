@@ -14,7 +14,8 @@ yolo_stick_logic/
 │   ├── camera.py
 │   ├── inference.py
 │   ├── logic.py
-│   └── recorder.py
+│   ├── recorder.py
+│   └── video_audio.py      # 提示音混入录像
 ├── test/                   # 测试 / 调试脚本
 ├── sh/                     # Docker 启动脚本
 └── out/                    # 录像输出（运行时生成，已忽略）
@@ -37,8 +38,9 @@ yolo_stick_logic/
 | --- | --- |
 | `camera.py` | 摄像头采集。用 `gst-launch-1.0` 子进程读 Jetson CSI 摄像头，把 BGR 裸流还原成 numpy 帧，接口模仿 `cv2.VideoCapture`；按 `config.ROTATE_CCW_90` 在帧入队前做逆时针 90° 旋转，`camera_worker` 不断把最新帧塞进 `frame_q`（满了丢旧帧）。 |
 | `inference.py` | YOLO 推理。加载模型并预热、读取模型自带类别名；每帧推理后用 `results.plot()` 画框，检测数据（框/类别/置信度）送 `result_q`，标注后的画面送 `recorder_q`。 |
-| `logic.py` | 核心决策（盲杖业务逻辑）。按有效画面尺寸（默认逆时针旋转后 480×640）划分「正前方 / 侧方 / 近距离 / 危险距离」区域，分别处理盲道居中、上下楼梯、水坑井盖、草地/斑马线/木板；带冷却时间去重、TTS 语音播报（默认只打印），并把状态推给 `state_q`。 |
-| `recorder.py` | 录制。收标注帧，用 PIL 叠加中文状态、最近告警、时间戳和实测 FPS（解决 OpenCV 中文乱码），按前两帧间隔自动测算真实帧率，写入 `out/日期/record_时间戳.mp4`。 |
+| `logic.py` | 核心决策（盲杖业务逻辑）。按有效画面尺寸（默认逆时针旋转后 480×640）划分「正前方 / 侧方 / 近距离 / 危险距离」区域，分别处理盲道居中、上下楼梯、水坑井盖、草地/斑马线/木板；带冷却时间去重、TTS 语音播报，并把状态推给 `state_q`；每次真实发声还会把 `{时间戳, WAV, 文案}` 发给录制进程（`audio_q`）。 |
+| `recorder.py` | 录制。收标注帧，用 PIL 叠加中文状态、最近告警、时间戳和实测 FPS（解决 OpenCV 中文乱码），按前两帧间隔自动测算真实帧率，写入 `out/日期/record_时间戳.mp4`；结束前调用 `video_audio` 把提示音混成音轨。 |
+| `video_audio.py` | 提示音混入录像。读 WAV（8/16/24/32-bit，多声道取平均）→ 重采样 → 按事件偏移叠加成与视频等长的音轨 → ffmpeg 复制视频流 + AAC 编码混流。 |
 
 ## models/ — 模型权重
 
@@ -137,3 +139,42 @@ docker exec yolo26_csi_speak fc-cache -fv
 > ```bash
 > -v /usr/share/fonts/truetype/wqy:/usr/share/fonts/truetype/wqy:ro
 > ```
+
+# 提示音混入录像
+
+录制结束后，`nodes/video_audio.py` 会把本次**实际播放过**的语音提示按时间轴铺成一条音轨，再用 ffmpeg 和视频合成——输出仍是 `out/日期/record_时间戳.mp4`，播放时能听到提示音。
+
+`config.py` 开关：
+
+```python
+MUX_ALERT_AUDIO = True    # False → 只录画面，不生成音轨
+AUDIO_MIX_RATE = 22050    # 混音采样率，语音够用；想更通用改 44100
+```
+
+原理：`logic.speak()` 每次真实发声时，把 `{时间戳, WAV 路径, 文案}` 塞进 `audio_q`（冷却期内的提醒不会发，因为它本来就没播）；录制进程以**视频首帧时刻为 0 点**算出每条提示的偏移，叠加成与视频等长的音轨，最后
+`ffmpeg -c:v copy -c:a aac` 混流（视频流直接复制，不重新编码，画质无损）。
+
+不录制系统声卡，所以**音画不会漂移**，也不用给容器 PulseAudio monitor 权限；提示音文件本身参与混音，所以就算现场喇叭没插、用户没听到，视频里也有声音。
+
+容器需要 ffmpeg：
+
+```bash
+# 进容器后
+apt-get install -y ffmpeg
+# 或从宿主机一条命令
+docker exec -it yolo26_csi_speak bash -c "apt-get install -y ffmpeg && ffmpeg -version | head -1"
+```
+
+没装 ffmpeg 也不会丢画面：视频照常保存成无声 mp4，音轨单独存成 `record_时间戳.mix.wav`，并打印手动合成命令：
+
+```bash
+ffmpeg -i record_2026-10-25_10-00-00.mp4 -i record_2026-10-25_10-00-00.mix.wav -c:v copy -c:a aac out.mp4
+```
+
+启动/结束日志可以确认状态：
+
+```
+[Recorder] 提示音混入录像: 开 (ffmpeg: /usr/bin/ffmpeg)
+[Recorder] 已混入 12 条语音提示 → ./out/2026-10-25/record_2026-10-25_10-00-00.mp4
+```
+

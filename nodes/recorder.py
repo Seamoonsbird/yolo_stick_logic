@@ -9,6 +9,7 @@
   - 文件名带时间戳，不覆盖旧视频
   - 显示最近告警文案
   - VideoWriter FPS 根据头两帧到达间隔动态计算
+  - 提示音按事件时间戳混入视频（nodes/video_audio.py + ffmpeg），音画同源不漂移
 """
 
 from __future__ import annotations
@@ -25,8 +26,12 @@ from config import (
     RECORDER_CODEC,
     RECORDER_WIDTH,
     RECORDER_HEIGHT,
+    MUX_ALERT_AUDIO,
+    AUDIO_MIX_RATE,
     get_output_dir,
 )
+
+from nodes import video_audio
 
 # ==========================================
 # 中文字体检测
@@ -165,24 +170,87 @@ def _put_text_pil(frame, text: str, xy: tuple[int, int], *,
 def _build_video_writer(fps: float):
     """
     创建 cv2.VideoWriter，文件名带时间戳避免覆盖。
+
+    返回 (writer, write_path, final_path):
+      MUX_ALERT_AUDIO=True 时先写临时文件 *.silent.mp4，录完混入提示音后
+      再落成正式的 record_时间戳.mp4；否则两者是同一个文件。
     """
     out_dir = get_output_dir()
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    filepath = f"{out_dir}/record_{timestamp}.mp4"
+    final_path = f"{out_dir}/record_{timestamp}.mp4"
+    write_path = f"{out_dir}/record_{timestamp}.silent.mp4" if MUX_ALERT_AUDIO else final_path
 
     fourcc = cv2.VideoWriter_fourcc(*RECORDER_CODEC)  # pyright: ignore[reportAttributeAccessIssue]
 
     writer = cv2.VideoWriter(
-        filepath,
+        write_path,
         fourcc,
         fps,
         (RECORDER_WIDTH, RECORDER_HEIGHT),
     )
 
     if not writer.isOpened():
-        raise RuntimeError(f"无法创建视频文件：{filepath}")
+        raise RuntimeError(f"无法创建视频文件：{write_path}")
 
-    return writer, filepath
+    return writer, write_path, final_path
+
+
+# ==========================================
+# 提示音混入录像
+# ==========================================
+
+def _finalize_audio(write_path: str, final_path: str, events: list,
+                    t_start: float, frame_count: int, real_fps: float):
+    """
+    录制结束后把播报事件铺成音轨、混进视频。
+
+    events: [{"t": 绝对时间戳, "wav": 路径, "text": 文案}, ...]
+    失败时保留无声视频，不丢画面。
+    """
+    if not MUX_ALERT_AUDIO or write_path == final_path:
+        return
+
+    duration = frame_count / real_fps if real_fps > 0 else 0.0
+
+    # 绝对时间戳 → 相对视频首帧的偏移（首帧之前的告警夹到 0，即开场就响）
+    timed = []
+    for ev in events:
+        try:
+            offset = max(0.0, float(ev.get("t", 0.0)) - t_start)
+        except Exception:
+            continue
+        if duration > 0 and offset > duration:
+            continue        # 视频已经结束之后的提醒，放不进画面
+        timed.append((offset, ev.get("wav")))
+
+    mix_wav = os.path.splitext(final_path)[0] + ".mix.wav"
+
+    if timed and video_audio.build_wav(mix_wav, timed, duration, AUDIO_MIX_RATE):
+        if video_audio.mux_audio(write_path, mix_wav, final_path):
+            try:
+                os.remove(write_path)
+            except OSError:
+                pass
+            try:
+                os.remove(mix_wav)
+            except OSError:
+                pass
+            print(f"[Recorder] 已混入 {len(timed)} 条语音提示 → {final_path}")
+            return
+
+        # 有音轨但混流失败（多半是没装 ffmpeg）
+        print("[Recorder] ⚠ 混流失败，视频保持无声；音频已单独保存：", mix_wav)
+        print("[Recorder]   手动合成: ffmpeg -i "
+              f"{os.path.basename(final_path)} -i {os.path.basename(mix_wav)} "
+              "-c:v copy -c:a aac out.mp4")
+    else:
+        print("[Recorder] 本次录制没有需要混入的语音提示，视频不含音轨")
+
+    # 兜底：把临时文件改名成正式文件名，保证画面一定留得下来
+    try:
+        os.replace(write_path, final_path)
+    except OSError as e:
+        print(f"[Recorder] ⚠ 重命名失败: {e}")
 
 
 # ==========================================
@@ -242,7 +310,7 @@ def _draw_overlay(frame, state: dict, frame_count: int, real_fps: float):
 # 主循环
 # ==========================================
 
-def recorder_worker(recorder_q, stop_event, state_q):
+def recorder_worker(recorder_q, stop_event, state_q, audio_q=None):
     """
     录制主循环。
 
@@ -250,10 +318,18 @@ def recorder_worker(recorder_q, stop_event, state_q):
         1. 等待第一帧到达
         2. 等待第二帧到达 → 根据时间间隔计算真实 FPS
         3. 以真实 FPS 创建 VideoWriter，写入缓冲的 2 帧
-        4. 循环取帧 → 叠加信息 → 写入视频
-        5. stop_event 触发后清空残帧、释放资源
+        4. 循环取帧 → 叠加信息 → 写入视频；同时收集播报事件（audio_q）
+        5. stop_event 触发后清空残帧、释放资源，最后把提示音混进视频
     """
     print("[Recorder] 正在等待首帧以测量真实帧率...")
+
+    if MUX_ALERT_AUDIO:
+        if video_audio.FFMPEG_BIN:
+            print(f"[Recorder] 提示音混入录像: 开 (ffmpeg: {video_audio.FFMPEG_BIN})")
+        else:
+            print("[Recorder] ⚠ 提示音混入录像: 开，但未找到 ffmpeg，"
+                  "将只保存 .wav 音轨，需手动合成")
+            print("[Recorder]    安装: apt-get install -y ffmpeg")
 
     # 检测中文字体
     font_path = _find_cjk_font()
@@ -268,6 +344,19 @@ def recorder_worker(recorder_q, stop_event, state_q):
 
     current_state: dict = {}
     frame_count = 0
+    audio_events: list = []      # [{"t": 绝对时间戳, "wav": 路径, "text": 文案}, ...]
+
+    def _drain_audio_events():
+        """把逻辑进程发来的播报事件收进本地列表（不阻塞）。"""
+        if audio_q is None:
+            return
+        while True:
+            try:
+                audio_events.append(audio_q.get_nowait())
+            except queue.Empty:
+                break
+            except Exception:
+                break
 
     # ---- 阶段 1：缓冲开头两帧，测量真实 FPS ----
     buffered_frames = []
@@ -319,8 +408,8 @@ def recorder_worker(recorder_q, stop_event, state_q):
     print(f"[Recorder] 实测帧率: {real_fps:.1f} fps (帧间隔: {delta*1000:.0f}ms)")
 
     # ---- 阶段 2：创建 VideoWriter（文件名带时间戳） ----
-    writer, filepath = _build_video_writer(real_fps)
-    print(f"[Recorder] 视频文件已创建: {filepath}")
+    writer, write_path, final_path = _build_video_writer(real_fps)
+    print(f"[Recorder] 视频文件已创建: {final_path}")
 
     # 写入缓冲的两帧
     for f in buffered_frames:
@@ -335,6 +424,9 @@ def recorder_worker(recorder_q, stop_event, state_q):
                     current_state = state_q.get_nowait()
                 except queue.Empty:
                     break
+
+            # 顺手收走这期间发生的播报事件（录像音轨用）
+            _drain_audio_events()
 
             # 从录制队列取帧
             try:
@@ -356,8 +448,21 @@ def recorder_worker(recorder_q, stop_event, state_q):
             frame_count += 1
             frame = _draw_overlay(frame, current_state, frame_count, real_fps)
             writer.write(frame)
+        _drain_audio_events()   # 收尾阶段最后几条提醒也要进音轨
 
     finally:
         writer.release()
-        print(f"[Recorder] 视频已保存: {filepath}  "
+        print(f"[Recorder] 视频已保存: {final_path}  "
               f"(共 {frame_count} 帧, {real_fps:.1f} fps)")
+
+        # ---- 阶段 5：把提示音混进视频 ----
+        try:
+            _finalize_audio(write_path, final_path, audio_events,
+                            t_first, frame_count, real_fps)
+        except Exception as e:
+            print(f"[Recorder] ⚠ 混入提示音失败: {e}")
+            if write_path != final_path and os.path.isfile(write_path):
+                try:
+                    os.replace(write_path, final_path)
+                except OSError:
+                    pass
