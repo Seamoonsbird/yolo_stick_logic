@@ -5,7 +5,7 @@
   1. 盲道检测   — 提醒走盲道正中间（偏移超阈值时语音纠正）
   2. 楼梯检测   — 上/下楼梯提醒（近距离告警）
   3. 水坑/井盖  — 前方障碍物提醒（高优先级）
-  4. 木板/草地/斑马线 — 仅正前方提醒（侧前方忽略，避免误报）
+  4. 草地/斑马线/木板 — 正前方提醒（远处也提醒；侧方可开关）
 
 输出:
   - 控制台语音文案（可接入 TTS）
@@ -71,6 +71,17 @@ MIN_CONFIDENCE = 0.5
 
 # 近距离判断：目标底部 y2 超过此值视为「即将到达」
 DANGER_ZONE_Y = FRAME_HEIGHT * 4 // 5                    # 640 高时 = 512 = 危险距离
+
+# ---- 草地 / 斑马线 / 木板的提醒策略 ----
+# 正前方远处（还没走近）是否也语音提醒。
+#   True  → 一进正前方就提前告知（默认，用户反馈「想早点听到」）
+#   False → 只有走近（y2 > NEAR_ZONE_Y）才提醒，远处只显示状态文字
+TERRAIN_ALERT_FROM_FAR = True
+
+# 侧前方是否也提醒。
+#   默认 False：路边草地/斑马线常常一直存在，5 秒一次的播报会盖掉盲道纠正、
+#   水坑井盖这类更重要的告警（盲杖设备里属于「噪音」）。想开就改 True。
+TERRAIN_ALERT_SIDE = False
 
 # ---- 告警冷却时间（秒），防止频繁重复提醒 ----
 ALERT_COOLDOWN = {
@@ -474,9 +485,13 @@ def handle_obstacles(groups, alert_mgr, status: dict):
 
 def handle_terrain(groups, alert_mgr, status: dict):
     """
-    地形检测（草地/斑马线/木板）：仅正前方提醒，侧前方忽略。
-    - 正前方 + 近距离 → 提醒地面变化
-    - 侧前方 → 不提醒（用户不会走到侧面）
+    地形检测（草地/斑马线/木板）。
+
+    提醒策略（见文件顶部 TERRAIN_ALERT_* 开关）:
+      - 正前方 + 危险距离 → 专属提醒「请小心脚下 / 注意来往车辆」
+      - 正前方 + 近距离   → 通用提醒「前方有 X，请注意」
+      - 正前方 + 远处     → TERRAIN_ALERT_FROM_FAR=True 时也提醒（默认开）
+      - 侧前方            → TERRAIN_ALERT_SIDE=True 时才提醒（默认关）
     """
     terrain_items = [
         (CLASS_GRASS,     "草地"),
@@ -489,13 +504,26 @@ def handle_terrain(groups, alert_mgr, status: dict):
         if not detections:
             continue
 
-        # 关键逻辑：只看正前方，侧前方忽略
         ahead = filter_ahead_only(detections)
-        side_count = len([d for d in detections if is_in_side_zone(d["box"])])
+        side = [d for d in detections if is_in_side_zone(d["box"])]
 
+        # ---- 只有侧方的地形 ----
         if not ahead:
-            if side_count > 0:
-                status[label] = f"侧方有{side_count}处(忽略)"
+            if not side:
+                continue
+            if not TERRAIN_ALERT_SIDE:
+                status[label] = f"侧方有{len(side)}处(忽略)"
+                continue
+
+            nearest_side = select_largest(side)
+            if nearest_side is None:
+                continue
+            side_cx, _ = box_center(nearest_side["box"])
+            side_name = "左" if side_cx < CENTER_X else "右"
+            status[label] = f"侧方有{len(side)}处(已提醒)"
+            # 侧方不走预录音频：那些 wav 里念的是「前方…」，用在侧方会误导，
+            # 这里让 espeak 按真实文案合成（sound_key=None）。
+            speak(f"{side_name}侧有{label}，请注意", cls_name, alert_mgr)
             continue
 
         nearest = select_largest(ahead)
@@ -516,6 +544,11 @@ def handle_terrain(groups, alert_mgr, status: dict):
         elif is_nearby(nearest["box"]):
             status[label] = "🔶正前方"
             speak(f"前方{label}，请注意", cls_name, alert_mgr,
+                  sound_key=f"{cls_name}_warn")
+        elif TERRAIN_ALERT_FROM_FAR:
+            # 远处：提前告知，别等走到跟前
+            status[label] = "正前方远处"
+            speak(f"前方远处有{label}，请注意", cls_name, alert_mgr,
                   sound_key=f"{cls_name}_warn")
         else:
             # 远处不提醒，避免频繁干扰
@@ -543,7 +576,9 @@ def logic_worker(result_q, recorder_q, stop_event, state_q=None):
     print(f"[盲杖] 正前方区域: x∈[{AHEAD_ZONE_X1}, {AHEAD_ZONE_X2}]")
     print(f"[盲杖] 近距离阈值: y>{NEAR_ZONE_Y}, 危险距离: y>{DANGER_ZONE_Y}")
     print(f"[盲杖] 盲道偏移容忍: ±{BLIND_PATH_OFFSET_TOLERANCE}px")
-    print(f"[盲杖] 侧前方草地/斑马线 → 不提醒")
+    print(f"[盲杖] 草地/斑马线/木板: 正前方提醒="
+          f"{'远处也提醒' if TERRAIN_ALERT_FROM_FAR else '仅近距离提醒'}, "
+          f"侧方{'也提醒' if TERRAIN_ALERT_SIDE else '不提醒'}")
     print()
 
     alert_mgr = AlertManager()
