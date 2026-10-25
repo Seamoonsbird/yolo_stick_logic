@@ -29,26 +29,19 @@ __all__ = ["FFMPEG_BIN", "build_wav", "mux_audio"]
 # 启动时探测一次，避免每条告警都 which
 FFMPEG_BIN = shutil.which("ffmpeg")
 
+# 生成音轨时的分块长度（秒）。内存只跟它有关，与录像时长无关。
+_BLOCK_SEC = 5.0
+
 
 # ==========================================
 # WAV 读取 / 重采样
 # ==========================================
 
-def _read_mono(path: str):
+def _decode_pcm(raw: bytes, sw: int, ch: int):
     """
-    读 WAV → (float32 单声道数据, 采样率)。失败返回 (None, 0)。
-    支持 8/16/24/32-bit PCM；多声道取平均。
+    PCM 字节 → float32 单声道 [-1, 1]。支持 8/16/24/32-bit，多声道取平均。
+    不支持时返回 None。
     """
-    try:
-        with wave.open(path, "rb") as w:
-            ch = w.getnchannels()
-            sw = w.getsampwidth()
-            sr = w.getframerate()
-            raw = w.readframes(w.getnframes())
-    except Exception as e:
-        print(f"[video_audio] ⚠️ 读取 WAV 失败: {path} ({e})")
-        return None, 0
-
     if sw == 1:
         data = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
     elif sw == 2:
@@ -61,13 +54,34 @@ def _read_mono(path: str):
     elif sw == 4:
         data = np.frombuffer(raw, dtype="<i4").astype(np.float32) / 2147483648.0
     else:
-        print(f"[video_audio] ⚠️ 不支持的位深 {sw} 字节: {path}")
-        return None, 0
+        return None
 
     if ch > 1 and data.size % ch == 0:
         data = data.reshape(-1, ch).mean(axis=1)
 
-    return np.ascontiguousarray(data, dtype=np.float32), sr
+    return np.ascontiguousarray(data, dtype=np.float32)
+
+
+def _read_mono(path: str):
+    """
+    读整个 WAV → (float32 单声道数据, 采样率)。失败返回 (None, 0)。
+    """
+    try:
+        with wave.open(path, "rb") as w:
+            ch = w.getnchannels()
+            sw = w.getsampwidth()
+            sr = w.getframerate()
+            raw = w.readframes(w.getnframes())
+    except Exception as e:
+        print(f"[video_audio] ⚠️ 读取 WAV 失败: {path} ({e})")
+        return None, 0
+
+    data = _decode_pcm(raw, sw, ch)
+    if data is None:
+        print(f"[video_audio] ⚠️ 不支持的位深 {sw} 字节: {path}")
+        return None, 0
+
+    return data, sr
 
 
 def _resample(data: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:
@@ -96,48 +110,104 @@ def build_wav(out_path: str, events, duration: float, rate: int = 22050) -> bool
     返回:
       True  → 至少混入一条，文件已写出
       False → 没有可用音频（文件不存在 / 全被裁掉），未写出文件
+
+    实现要点（内存）:
+      按 _BLOCK_SEC 秒一块流式生成并写盘，内存占用只与块大小有关，与视频
+      时长无关。老写法一次性 np.zeros(duration*rate)，录 8 小时要 2.5GB，
+      Jetson 上必 OOM。
     """
     total = max(1, int(round(max(0.0, duration) * rate)))
-    mix = np.zeros(total, dtype=np.float32)
-    placed = 0
 
+    # 先只读 WAV 头，算出每条在输出时间轴上的区间（不加载音频数据）
+    entries = []
     for off, wav in events:
         if not wav or not os.path.isfile(wav):
             print(f"[video_audio] ⚠️ 提示音文件已不存在，跳过: {wav}")
             continue
-
-        data, sr = _read_mono(wav)
-        if data is None or data.size == 0:
+        try:
+            with wave.open(wav, "rb") as w:
+                ch, sw, sr, nframes = (w.getnchannels(), w.getsampwidth(),
+                                       w.getframerate(), w.getnframes())
+        except Exception as e:
+            print(f"[video_audio] ⚠️ 读取 WAV 失败: {wav} ({e})")
             continue
-
-        data = _resample(data, sr, rate)
+        if nframes <= 0 or sr <= 0 or sw not in (1, 2, 3, 4):
+            print(f"[video_audio] ⚠️ 跳过不可用 WAV: {wav}")
+            continue
 
         start = int(round(max(0.0, float(off)) * rate))
         if start >= total:
-            # 提示发生在视频结束之后（收尾阶段的告警），丢弃
-            continue
+            continue                      # 提示发生在视频结束之后，丢弃
+        span = int(round(nframes * rate / float(sr)))
+        entries.append((start, span, wav, ch, sw, sr))
 
-        end = min(total, start + data.size)
-        mix[start:end] += data[: end - start]
-        placed += 1
-
-    if placed == 0:
+    if not entries:
         return False
 
-    np.clip(mix, -1.0, 1.0, out=mix)          # 叠加可能超过 1.0，削顶保护
-    pcm = (mix * 32767.0).astype("<i2")
+    entries.sort(key=lambda e: e[0])
+
+    block = max(1, int(rate * _BLOCK_SEC))
+    placed = 0
 
     try:
-        with wave.open(out_path, "wb") as w:
-            w.setnchannels(1)
-            w.setsampwidth(2)
-            w.setframerate(rate)
-            w.writeframes(pcm.tobytes())
+        with wave.open(out_path, "wb") as out:
+            out.setnchannels(1)
+            out.setsampwidth(2)
+            out.setframerate(rate)
+
+            pos = 0
+            while pos < total:
+                n = min(block, total - pos)
+                mix = np.zeros(n, dtype=np.float32)
+
+                for start, span, wav, ch, sw, sr in entries:
+                    end = start + span
+                    if end <= pos:
+                        continue
+                    if start >= pos + n:
+                        break                 # entries 按 start 排序，后面的更靠后
+
+                    lo = max(start, pos)
+                    hi = min(end, pos + n)
+
+                    # 输出时间轴上的交集 → 源 WAV 的采样区间
+                    src_from = int((lo - start) * sr / float(rate))
+                    src_count = max(1, int(np.ceil((hi - lo) * sr / float(rate))))
+                    try:
+                        with wave.open(wav, "rb") as w:
+                            nf = w.getnframes()
+                            if nf <= 0:
+                                continue
+                            w.setpos(max(0, min(src_from, nf - 1)))
+                            raw = w.readframes(src_count)
+                    except Exception as e:
+                        print(f"[video_audio] ⚠️ 读取音频片段失败: {wav} ({e})")
+                        continue
+
+                    data = _decode_pcm(raw, sw, ch)
+                    if data is None or data.size == 0:
+                        continue
+
+                    data = _resample(data, sr, rate)
+                    seg = data[: hi - lo]
+                    mix[lo - pos: lo - pos + seg.size] += seg
+                    placed += 1
+
+                np.clip(mix, -1.0, 1.0, out=mix)      # 叠加可能超过 1.0，削顶保护
+                out.writeframes((mix * 32767.0).astype("<i2").tobytes())
+                pos += n
     except Exception as e:
         print(f"[video_audio] ⚠️ 写音轨失败: {out_path} ({e})")
         return False
 
-    print(f"[video_audio] 音轨已生成: {placed} 条提示, {duration:.1f}s, {rate}Hz")
+    if placed == 0:
+        try:
+            os.remove(out_path)      # 内容全是静音，别留个空音轨
+        except OSError:
+            pass
+        return False
+
+    print(f"[video_audio] 音轨已生成: {len(entries)} 条提示, {duration:.1f}s, {rate}Hz")
     return True
 
 

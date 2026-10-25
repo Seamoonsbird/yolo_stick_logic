@@ -7,6 +7,7 @@ from nodes.recorder import recorder_worker
 from config import (
     ENABLE_RECORDER,
     MUX_ALERT_AUDIO,
+    SHUTDOWN_TIMEOUT,
     FRAME_QUEUE_MAXSIZE,
     RESULT_QUEUE_MAXSIZE,
     RECORDER_QUEUE_MAXSIZE,
@@ -65,13 +66,27 @@ def main():
 
     # ================================================
     # 清理资源
-    # ================================================  
-
-    process_cam.join()
-    process_inf.join()
-    process_log.join()
+    # ================================================
+    # 录制进程收尾时要把 mp4 的索引（moov）写进文件，这期间不能再被打断：
+    # 这里给每个进程限时等待，重复按 Ctrl+C 也不会中断收尾，只有真的卡死
+    # 超过 SHUTDOWN_TIMEOUT 才 terminate（那时文件可能不完整）。
+    procs = [process_cam, process_inf, process_log]
     if ENABLE_RECORDER:
-        process_rec.join()
+        procs.append(process_rec)
+
+    deadline = time.time() + SHUTDOWN_TIMEOUT
+    for p in procs:
+        while p.is_alive() and time.time() < deadline:
+            try:
+                p.join(timeout=1.0)
+            except KeyboardInterrupt:
+                print(f"[系统] 正在等 {p.name} 收尾（视频索引写入中），请等待完成…")
+        if p.is_alive():
+            print(f"[系统] ⚠ {p.name} 超过 {SHUTDOWN_TIMEOUT}s 未退出，强制结束"
+                  f"（正在录制的视频可能不完整）")
+            p.terminate()
+            p.join(timeout=5)
+
     print("多进程已关闭")
 
 

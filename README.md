@@ -156,6 +156,8 @@ AUDIO_MIX_RATE = 22050    # 混音采样率，语音够用；想更通用改 441
 
 不录制系统声卡，所以**音画不会漂移**，也不用给容器 PulseAudio monitor 权限；提示音文件本身参与混音，所以就算现场喇叭没插、用户没听到，视频里也有声音。
 
+音轨**按 5 秒一块流式生成并写盘**，内存占用只与块大小有关、与录像时长无关——录 8 小时也不会一次性吃掉 2.5GB 内存。代价是临时 WAV 体积按时长线性增长（8 小时 22.05kHz ≈ 1.3GB，混流成功后自动删除）；磁盘紧张时把 `AUDIO_MIX_RATE` 改成 `8000`，体积降到约 460MB。
+
 容器需要 ffmpeg：
 
 ```bash
@@ -169,6 +171,41 @@ docker exec -it yolo26_csi_speak bash -c "apt-get install -y ffmpeg && ffmpeg -v
 
 ```bash
 ffmpeg -i record_2026-10-25_10-00-00.mp4 -i record_2026-10-25_10-00-00.mix.wav -c:v copy -c:a aac out.mp4
+```
+
+## 安全策略（重要）
+
+视频**从第一帧起就写在正式文件名上**，`writer.release()` 先把 mp4 索引（`moov`）写好，这时文件已经能正常播放；随后才生成 `record_时间戳_mux.mp4` 并用 `os.replace` **原子替换**。
+
+所以：
+
+- 混音成功 → 你看到的就是带提示音的 `record_时间戳.mp4`；
+- 混音失败 / 没装 ffmpeg → 你看到的就是**和旧无声方案完全一样**的 `record_时间戳.mp4`，另加一个 `.mix.wav`；
+- 进程被中断 → 也不会出现名字奇怪的临时文件（以前的 `.silent.mp4` 已取消）。
+
+**退出时请按一次 `Ctrl+C`，等它打印「多进程已关闭」再走。** 录制进程收尾要写 mp4 索引，这期间被打断会得到「有画面数据但没有 `moov`」的残片，任何播放器都打不开（约等于视频报废）。为此：
+
+- 录制子进程忽略 `SIGINT`，`Ctrl+C` 只由主进程接管，不会打断写索引；
+- 录制子进程收到 `SIGTERM` 会置停止事件，被 `docker stop`/`kill` 时也能正常收尾；
+- 主进程退出时给每个进程最多 `SHUTDOWN_TIMEOUT`（默认 30s）收尾时间，重复按 `Ctrl+C` 只会提示等待，不会中断；超时才强制结束。
+
+## 视频打不开怎么办
+
+如果某个 `record_*.mp4`（或早期版本留下的 `*.silent.mp4`）播放器报错，先看它有没有索引：
+
+```bash
+# 能列出 codec / duration 就说明文件正常
+ffprobe -v error -show_entries format=duration -of default=nw=1 你的文件.mp4
+```
+
+报 `moov atom not found` 或直接失败，说明录制在写索引之前被杀了（文件里只有画面数据、没有索引）。**这种文件无法修复**，直接删掉重录；以后只在结束时按一次 `Ctrl+C`，等「多进程已关闭」打印出来。
+
+## 想彻底回到无声方案
+
+改一行就行，行为与加混音之前完全一致：
+
+```python
+MUX_ALERT_AUDIO = False
 ```
 
 启动/结束日志可以确认状态：
