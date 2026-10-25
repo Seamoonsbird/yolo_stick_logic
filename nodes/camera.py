@@ -3,6 +3,8 @@ import shutil
 import subprocess
 import numpy as np
 
+from config import ROTATE_CCW_90
+
 class GstPipeCapture:
     # 初始化函数
     def __init__(self, sensor_id=0, width=640, height=480, fps=30):
@@ -155,10 +157,18 @@ def open_jetson_csi_capture(sensor_id=0,width = 640, height = 480,fps = 30):
 def camera_worker(frame_q, stop_event):
     print("摄像头正在开启")
     cap, _ = open_jetson_csi_capture()
+    if ROTATE_CCW_90:
+        print("[Camera] 画面逆时针旋转 90°")
     while not stop_event.is_set():
         ret, frame = cap.read()
         if not ret:
             break
+        # 关键：旋转必须在这里做（帧入队之前）。
+        # 这样推理拿到的 bbox、逻辑算的左右、录制出的视频
+        # 全部处在同一个「已正立」的坐标系里，不会出现
+        # 框和画面错位、左右判断反掉的问题。
+        if ROTATE_CCW_90:
+            frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
         if frame_q.full():
             try:
                 frame_q.get_nowait()

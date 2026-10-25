@@ -41,21 +41,53 @@ _CJK_FONT_PATHS = [
     "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
     "/usr/share/fonts/truetype/arphic/uming.ttc",
     "/usr/share/fonts/truetype/arphic/ukai.ttc",
-    # Jetson 常见
-    "/usr/share/fonts/truetype/ttf-dejavu/DejaVuSans.ttf",  # 无中文，兜底
 ]
+
+# 固定路径都没命中时，再在这些目录里按文件名关键字扫一遍。
+# 好处：容器里 `docker cp` 任意中文 ttf/ttc 进去（哪怕放错目录）也能被自动找到。
+_CJK_FONT_DIRS = [
+    "/usr/share/fonts",
+    "/usr/local/share/fonts",
+    "/root/.fonts",
+    os.path.expanduser("~/.fonts"),
+    os.path.expanduser("~/.local/share/fonts"),
+]
+
+# 文件名里出现这些关键字即认为是中文字体（小写匹配）
+_CJK_FONT_KEYWORDS = (
+    "wqy", "zenhei", "microhei", "cjk", "notosanssc", "notoserifsc",
+    "sourcehansans", "sourcehanserif", "droidsansfallback",
+    "msyh", "msjh", "simhei", "simsun", "msung", "uming", "ukai", "arphic",
+)
+
+_CJK_FONT_EXTS = (".ttf", ".ttc", ".otf", ".otc")
 
 # PIL 字体缓存
 _pil_fonts: dict[int, object] = {}  # size -> ImageFont
 _pil_font_path: str | None = None
 
 
+def _scan_cjk_font() -> str | None:
+    """在字体目录里按关键字搜索中文字体（固定路径未命中时使用）。"""
+    for root_dir in _CJK_FONT_DIRS:
+        if not os.path.isdir(root_dir):
+            continue
+        for cur, _dirs, files in os.walk(root_dir):
+            for name in sorted(files):
+                lower = name.lower()
+                if not lower.endswith(_CJK_FONT_EXTS):
+                    continue
+                if any(k in lower for k in _CJK_FONT_KEYWORDS):
+                    return os.path.join(cur, name)
+    return None
+
+
 def _find_cjk_font() -> str | None:
-    """查找第一个可用的 CJK 字体。"""
+    """查找第一个可用的 CJK 字体：先查固定路径，再扫目录。"""
     for path in _CJK_FONT_PATHS:
         if os.path.isfile(path):
             return path
-    return None
+    return _scan_cjk_font()
 
 
 def _get_font(size: int):
@@ -228,7 +260,11 @@ def recorder_worker(recorder_q, stop_event, state_q):
     if font_path:
         print(f"[Recorder] 中文字体: {font_path}")
     else:
-        print("[Recorder] ⚠ 未找到中文字体，中文将降级显示。请安装: apt install fonts-wqy-zenhei")
+        print("[Recorder] ⚠ 未找到中文字体，中文将显示成方块。容器内执行：")
+        print("[Recorder]     apt-get update && apt-get install -y fonts-wqy-zenhei")
+        print("[Recorder]   或者从宿主机拷一个中文字体进去（二选一）：")
+        print("[Recorder]     docker cp /path/to/msyh.ttc <容器名>:/usr/share/fonts/truetype/")
+        print("[Recorder]     docker exec <容器名> fc-cache -fv")
 
     current_state: dict = {}
     frame_count = 0

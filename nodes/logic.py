@@ -20,8 +20,9 @@ import os
 import datetime
 from typing import Optional, List
 from config import (
-    CAMERA_WIDTH,
-    CAMERA_HEIGHT,
+    FRAME_WIDTH,
+    FRAME_HEIGHT,
+    ROTATE_CCW_90,
     ESPEAK_VOICE,
     ESPEAK_SPEED,
     ESPEAK_VOLUME,
@@ -33,27 +34,27 @@ from config import (
 # 几何常量
 # ==========================================
 
-FRAME_WIDTH = CAMERA_WIDTH
-FRAME_HEIGHT = CAMERA_HEIGHT
-CENTER_X = FRAME_WIDTH // 2       # 320
-CENTER_Y = FRAME_HEIGHT // 2      # 240
+# 直接用 config 里「旋转之后」的有效尺寸（逆时针转 90° 时 = 480x640）。
+# 如果这里还按 CAMERA_WIDTH/HEIGHT 算中线，旋转后所有的左右判断都会错。
+CENTER_X = FRAME_WIDTH // 2       # 旋转后 240
+CENTER_Y = FRAME_HEIGHT // 2      # 旋转后 320
 
 # ---- 空间分区 ----
 
 # 正前方区域：画面中央竖条（水平方向中间 50%）
-AHEAD_ZONE_WIDTH = FRAME_WIDTH // 2                     # 320px
-AHEAD_ZONE_X1 = CENTER_X - AHEAD_ZONE_WIDTH // 2        # 160
-AHEAD_ZONE_X2 = CENTER_X + AHEAD_ZONE_WIDTH // 2        # 480
+AHEAD_ZONE_WIDTH = FRAME_WIDTH // 2                     # 480 宽时 = 240px
+AHEAD_ZONE_X1 = CENTER_X - AHEAD_ZONE_WIDTH // 2        # = 120
+AHEAD_ZONE_X2 = CENTER_X + AHEAD_ZONE_WIDTH // 2        # = 360
 
 # 侧前方区域：正前方以外的两侧（草地/斑马线在这些区域不提醒）
-SIDE_LEFT_X2 = AHEAD_ZONE_X1                             # x < 160 = 左侧
-SIDE_RIGHT_X1 = AHEAD_ZONE_X2                            # x > 480 = 右侧
+SIDE_LEFT_X2 = AHEAD_ZONE_X1                             # x < 120 = 左侧
+SIDE_RIGHT_X1 = AHEAD_ZONE_X2                            # x > 360 = 右侧
 
 # 近距离区域：画面下方 1/3（y 越大越近）
-NEAR_ZONE_Y = FRAME_HEIGHT * 2 // 3                      # y > 320 = 近距离
+NEAR_ZONE_Y = FRAME_HEIGHT * 2 // 3                      # 640 高时 ≈ 426 = 近距离
 
 # 中距离区域
-MID_ZONE_Y = FRAME_HEIGHT // 3                           # y > 160 = 中距离以上
+MID_ZONE_Y = FRAME_HEIGHT // 3                           # ≈ 213 = 中距离以上
 
 # ==========================================
 # ⚙️ 盲杖参数
@@ -69,7 +70,7 @@ BLIND_PATH_LOSS_FRAMES = 15
 MIN_CONFIDENCE = 0.5
 
 # 近距离判断：目标底部 y2 超过此值视为「即将到达」
-DANGER_ZONE_Y = FRAME_HEIGHT * 4 // 5                    # y2 > 384 = 危险距离
+DANGER_ZONE_Y = FRAME_HEIGHT * 4 // 5                    # 640 高时 = 512 = 危险距离
 
 # ---- 告警冷却时间（秒），防止频繁重复提醒 ----
 ALERT_COOLDOWN = {
@@ -386,7 +387,7 @@ def handle_blind_path(groups, alert_mgr, status: dict):
         return
 
     cx, _ = box_center(main_path["box"])
-    offset = cx - CENTER_X
+    offset = cx - CENTER_X          # >0: 盲道在画面中线右侧；<0: 在中线左侧
 
     # 盲道区域宽度
     x1, _, x2, _ = main_path["box"]
@@ -396,7 +397,9 @@ def handle_blind_path(groups, alert_mgr, status: dict):
         status["盲道"] = f"居中 (偏移{offset:+.0f}px)"
         return
 
-    direction = "右" if offset < 0 else "左"
+    # 方向 = 盲道相对画面中线的位置。
+    # 盲道在左边（offset < 0）→ 说明人偏在盲道右侧 → 提示「偏左，向左调整」。
+    direction = "左" if offset < 0 else "右"
     status["盲道"] = f"偏{direction} (偏移{offset:+.0f}px)"
 
     dir_en = "left" if direction == "左" else "right"
@@ -427,14 +430,14 @@ def handle_stairs(groups, alert_mgr, status: dict):
         if nearest is None:
             continue
 
-            if is_danger_close(nearest["box"]):
-                status[label] = "⚠️危险距离"
-                speak(f"前方{label}，请小心慢行", cls_name, alert_mgr,
-                      sound_key=f"{cls_name}_near")
-            elif is_nearby(nearest["box"]):
-                status[label] = "🔶近距离"
-                speak(f"前方{label}，请注意", cls_name, alert_mgr,
-                      sound_key=f"{cls_name}_warn")
+        if is_danger_close(nearest["box"]):
+            status[label] = "⚠️危险距离"
+            speak(f"前方{label}，请小心慢行", cls_name, alert_mgr,
+                  sound_key=f"{cls_name}_near")
+        elif is_nearby(nearest["box"]):
+            status[label] = "🔶近距离"
+            speak(f"前方{label}，请注意", cls_name, alert_mgr,
+                  sound_key=f"{cls_name}_warn")
         else:
             status[label] = "远距离"
 
@@ -535,7 +538,8 @@ def logic_worker(result_q, recorder_q, stop_event, state_q=None):
     """
 
     print("[盲杖] 盲杖辅助系统启动")
-    print(f"[盲杖] 画面尺寸: {FRAME_WIDTH}x{FRAME_HEIGHT}")
+    print(f"[盲杖] 画面尺寸: {FRAME_WIDTH}x{FRAME_HEIGHT} (逆时针旋转后)" if ROTATE_CCW_90
+          else f"[盲杖] 画面尺寸: {FRAME_WIDTH}x{FRAME_HEIGHT}")
     print(f"[盲杖] 正前方区域: x∈[{AHEAD_ZONE_X1}, {AHEAD_ZONE_X2}]")
     print(f"[盲杖] 近距离阈值: y>{NEAR_ZONE_Y}, 危险距离: y>{DANGER_ZONE_Y}")
     print(f"[盲杖] 盲道偏移容忍: ±{BLIND_PATH_OFFSET_TOLERANCE}px")

@@ -35,9 +35,9 @@ yolo_stick_logic/
 
 | 文件 | 作用 |
 | --- | --- |
-| `camera.py` | 摄像头采集。用 `gst-launch-1.0` 子进程读 Jetson CSI 摄像头，把 BGR 裸流还原成 numpy 帧，接口模仿 `cv2.VideoCapture`；`camera_worker` 不断把最新帧塞进 `frame_q`（满了丢旧帧）。 |
+| `camera.py` | 摄像头采集。用 `gst-launch-1.0` 子进程读 Jetson CSI 摄像头，把 BGR 裸流还原成 numpy 帧，接口模仿 `cv2.VideoCapture`；按 `config.ROTATE_CCW_90` 在帧入队前做逆时针 90° 旋转，`camera_worker` 不断把最新帧塞进 `frame_q`（满了丢旧帧）。 |
 | `inference.py` | YOLO 推理。加载模型并预热、读取模型自带类别名；每帧推理后用 `results.plot()` 画框，检测数据（框/类别/置信度）送 `result_q`，标注后的画面送 `recorder_q`。 |
-| `logic.py` | 核心决策（盲杖业务逻辑）。按 640×480 划分「正前方 / 侧方 / 近距离 / 危险距离」区域，分别处理盲道居中、上下楼梯、水坑井盖、草地/斑马线/木板；带冷却时间去重、TTS 语音播报（默认只打印），并把状态推给 `state_q`。 |
+| `logic.py` | 核心决策（盲杖业务逻辑）。按有效画面尺寸（默认逆时针旋转后 480×640）划分「正前方 / 侧方 / 近距离 / 危险距离」区域，分别处理盲道居中、上下楼梯、水坑井盖、草地/斑马线/木板；带冷却时间去重、TTS 语音播报（默认只打印），并把状态推给 `state_q`。 |
 | `recorder.py` | 录制。收标注帧，用 PIL 叠加中文状态、最近告警、时间戳和实测 FPS（解决 OpenCV 中文乱码），按前两帧间隔自动测算真实帧率，写入 `out/日期/record_时间戳.mp4`。 |
 
 ## models/ — 模型权重
@@ -83,3 +83,57 @@ python main.py
 ```
 
 录像保存在 `out/日期/`，按 `Ctrl+C` 停止。
+
+# 画面方向（逆时针旋转 90°）
+
+`config.py` 里：
+
+```python
+ROTATE_CCW_90 = True    # 画面逆时针旋转 90°；摄像头方向正立了就改成 False
+```
+
+旋转在 `nodes/camera.py` 的 `camera_worker` 里、帧进队列**之前**完成，所以推理框、逻辑判断、录制视频用的都是同一套「已正立」坐标。
+旋转后有效画面尺寸变成 `480×640`（`config.FRAME_WIDTH / FRAME_HEIGHT` 会自动互换），`logic.py` 的中线、正前方区域、录制分辨率全部跟着变，不需要另外改。
+
+# 中文字体（Docker 容器内）
+
+录制画面上的中文由 PIL 渲染，容器里必须有中文字体，否则显示成方块。**容器内执行：**
+
+```bash
+# 1. 进容器
+docker exec -it yolo26_csi_speak bash
+
+# 2. 装字体（Debian/Ubuntu 系，Jetson 镜像通用）
+apt-get update
+apt-get install -y fonts-wqy-zenhei
+fc-cache -fv
+
+# 3. 验证：能列出中文字体即成功
+fc-list :lang=zh | head
+exit
+```
+
+一条命令版（在宿主机执行，不用进容器）：
+
+```bash
+docker exec -it yolo26_csi_speak bash -c "apt-get update && apt-get install -y fonts-wqy-zenhei && fc-cache -fv && fc-list :lang=zh"
+```
+
+容器没网或 apt 太慢时，从宿主机拷一个中文字体进去：
+
+```bash
+# Linux 宿主机
+docker cp /path/to/wqy-zenhei.ttc yolo26_csi_speak:/usr/share/fonts/truetype/
+# Windows 宿主机（字体在 C:\Windows\Fonts）
+docker cp C:\Windows\Fonts\msyh.ttc yolo26_csi_speak:/usr/share/fonts/truetype/
+# 随后刷新字体缓存
+docker exec yolo26_csi_speak fc-cache -fv
+```
+
+启动时 `[Recorder] 中文字体: /usr/share/fonts/...` 打印出真实路径即生效；找不到时 `recorder.py` 会自动扫描 `/usr/share/fonts` 下的 `wqy / noto cjk / msyh / simhei / droid fallback` 等文件，所以拷进任意子目录也能被识别。
+
+> 容器一旦删除重建，apt 装的字体就没了。想永久保留，可以在 `sh/run_yolo_docker_speak.sh` 的 `docker run` 里加一行，把宿主机的字体目录只读挂进去：
+>
+> ```bash
+> -v /usr/share/fonts/truetype/wqy:/usr/share/fonts/truetype/wqy:ro
+> ```

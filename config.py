@@ -30,6 +30,20 @@ USE_CSI_CAMERA = True
 # USB 摄像头的设备索引（仅当 USE_CSI_CAMERA=False 时生效）
 USB_CAMERA_INDEX = 0
 
+# 是否把画面逆时针旋转 90°。
+# Jetson CSI 摄像头（nvarguscamerasrc）经常是竖装/横装反的，
+# 打开后画面方向不对时把这里设为 True 校正。
+# 旋转在 nodes/camera.py 里、帧进入队列之前完成，
+# 所以推理、逻辑、录制拿到的都是旋转后的同一套坐标。
+ROTATE_CCW_90 = True
+
+# ---- 旋转后的有效画面尺寸（下游一律用这两个常量）----
+# 逆时针转 90° 后宽高互换：640x480 → 480x640
+if ROTATE_CCW_90:
+    FRAME_WIDTH, FRAME_HEIGHT = CAMERA_HEIGHT, CAMERA_WIDTH     # 480 x 640
+else:
+    FRAME_WIDTH, FRAME_HEIGHT = CAMERA_WIDTH, CAMERA_HEIGHT     # 640 x 480
+
 # ============================================================
 # YOLO 推理参数
 # ============================================================
@@ -94,9 +108,10 @@ RECORDER_CODEC = "mp4v"
 # 录制帧率由 recorder 根据前两帧实际到达间隔自动测量，无需硬编码。
 # 如果头两帧间隔就是 5fps，视频就标 5fps——播放速度 = 真实速度。
 
-# 录制分辨率（默认跟随摄像头分辨率）
-RECORDER_WIDTH = CAMERA_WIDTH
-RECORDER_HEIGHT = CAMERA_HEIGHT
+# 录制分辨率（跟随旋转后的有效画面尺寸，不可再用 CAMERA_WIDTH/HEIGHT，
+# 否则旋转后写出的视频会被拉伸变形）
+RECORDER_WIDTH = FRAME_WIDTH
+RECORDER_HEIGHT = FRAME_HEIGHT
 
 # ============================================================
 # 输出路径

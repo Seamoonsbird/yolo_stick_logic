@@ -18,6 +18,8 @@ from config import (
     TARGET_CLASSES,
     CLASS_NAMES,
     PRINT_FPS,
+    FRAME_WIDTH,
+    FRAME_HEIGHT,
 )
 
 
@@ -43,7 +45,8 @@ def _load_model():
     print(f"[Inference] 类别: {_model_names}")
 
     print("[Inference] 预热中...")
-    dummy = np.zeros((480, 640, 3), dtype=np.uint8)
+    # 用旋转后的有效尺寸构造预热帧（640x480 旋转后为 480x640）
+    dummy = np.zeros((FRAME_HEIGHT, FRAME_WIDTH, 3), dtype=np.uint8)
     model(dummy, conf=CONF_THRESHOLD, iou=IOU_THRESHOLD,
           device=DEVICE, half=USE_FP16 and DEVICE == "cuda", verbose=False)
     print("[Inference] 就绪")
